@@ -831,23 +831,21 @@ class EnterpriseWebServer:
                     <div id="kline-chart" style="width: 100%; height: 280px;"></div>
                     <!-- 成交量图表 -->
                     <div id="volume-chart" style="width: 100%; height: 90px; margin-top: 5px;"></div>
-                    
-                    <!-- K线详细信息显示区域 -->
-                    <div id="kline-info" class="mt-2 p-2 bg-dark text-white rounded" style="display: none; font-size: 12px;">
-                        <div class="row">
-                            <div class="col-md-3"><b>开盘:</b> <span id="info-open">-</span></div>
-                            <div class="col-md-3"><b>最高:</b> <span id="info-high">-</span></div>
-                            <div class="col-md-3"><b>最低:</b> <span id="info-low">-</span></div>
-                            <div class="col-md-3"><b>收盘:</b> <span id="info-close">-</span></div>
-                        </div>
-                        <div class="row mt-1">
-                            <div class="col-md-3"><b>涨跌:</b> <span id="info-change">-</span></div>
-                            <div class="col-md-3"><b>涨幅:</b> <span id="info-change-percent">-</span></div>
-                            <div class="col-md-3"><b>振幅:</b> <span id="info-amplitude">-</span></div>
-                            <div class="col-md-3"><b>成交量:</b> <span id="info-volume">-</span></div>
-                        </div>
-                    </div>
                 </div>
+            </div>
+            
+            <!-- K线浮动提示 -->
+            <div id="kline-tooltip" style="position: fixed; z-index: 10000; background: rgba(0, 0, 0, 0.95); border: 1px solid #444; border-radius: 8px; padding: 12px; color: white; font-size: 12px; display: none; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5); min-width: 200px;">
+                <table style="width: 100%;">
+                    <tr><td style="color: #888; padding: 2px 4px;">开盘:</td><td id="tt-open" style="padding: 2px 4px;">-</td></tr>
+                    <tr><td style="color: #888; padding: 2px 4px;">最高:</td><td id="tt-high" style="padding: 2px 4px;">-</td></tr>
+                    <tr><td style="color: #888; padding: 2px 4px;">最低:</td><td id="tt-low" style="padding: 2px 4px;">-</td></tr>
+                    <tr><td style="color: #888; padding: 2px 4px;">收盘:</td><td id="tt-close" style="padding: 2px 4px;">-</td></tr>
+                    <tr><td style="color: #888; padding: 2px 4px;">涨跌:</td><td id="tt-change" style="padding: 2px 4px;">-</td></tr>
+                    <tr><td style="color: #888; padding: 2px 4px;">涨幅:</td><td id="tt-change-percent" style="padding: 2px 4px;">-</td></tr>
+                    <tr><td style="color: #888; padding: 2px 4px;">振幅:</td><td id="tt-amplitude" style="padding: 2px 4px;">-</td></tr>
+                    <tr><td style="color: #888; padding: 2px 4px;">成交量:</td><td id="tt-volume" style="padding: 2px 4px;">-</td></tr>
+                </table>
             </div>
             
             <!-- 指标图区域 - 更紧凑的布局 -->

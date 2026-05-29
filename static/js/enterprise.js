@@ -504,12 +504,26 @@ class TradingWebSocket {
                 
                 this.crosshairTimer = setTimeout(() => {
                     if (param.time && this.klineData.length > 0) {
-                        this.showKlineInfoByTime(param.time);
+                        this.showKlineInfoByTime(param.time, param.point);
                     } else {
                         this.hideKlineInfo();
                     }
                 }, 50);
             });
+            
+            // 监听鼠标移动更新tooltip位置
+            const mainChartDom = document.getElementById('kline-chart');
+            if (mainChartDom) {
+                mainChartDom.addEventListener('mousemove', (e) => {
+                    this.lastMouseX = e.clientX;
+                    this.lastMouseY = e.clientY;
+                    this.updateTooltipPosition();
+                });
+                
+                mainChartDom.addEventListener('mouseleave', () => {
+                    this.hideKlineInfo();
+                });
+            }
             
             // 等待WebSocket推送数据，不需要手动加载
             
@@ -709,6 +723,125 @@ class TradingWebSocket {
                 const now = new Date();
                 timeEl.textContent = now.toLocaleTimeString('zh-CN');
             }, 1000);
+        }
+    }
+    
+    // 切换K线周期
+    async changeTimeframe(timeframe) {
+        this.currentTimeframe = timeframe;
+        showToast(`正在切换到 ${timeframe} 周期...`, 'info');
+        
+        try {
+            const response = await fetch(`/api/indicators/XAUUSD/${timeframe}?count=200`);
+            const result = await response.json();
+            
+            if (result.success && result.candles) {
+                this.updateAllCharts(result.candles, result.indicators);
+                showToast(`已切换到 ${timeframe} 周期`, 'success');
+            } else {
+                showToast('获取数据失败', 'error');
+            }
+        } catch (error) {
+            console.error('切换周期失败:', error);
+            showToast('切换周期失败', 'error');
+        }
+    }
+    
+    // 根据时间显示K线详细信息
+    showKlineInfoByTime(time, point) {
+        const tooltip = document.getElementById('kline-tooltip');
+        if (!tooltip || this.klineData.length === 0) return;
+        
+        // 找到时间匹配或最近的K线
+        let targetKline = null;
+        let minDiff = Infinity;
+        
+        for (const kline of this.klineData) {
+            const klineTime = this.convertTime(kline.time);
+            const diff = Math.abs(klineTime - time);
+            if (diff < minDiff) {
+                minDiff = diff;
+                targetKline = kline;
+            }
+        }
+        
+        if (targetKline) {
+            if (point) {
+                this.lastMouseX = point.x;
+                this.lastMouseY = point.y;
+            }
+            this.showKlineInfo(targetKline);
+        }
+    }
+    
+    // 显示K线详细信息
+    showKlineInfo(kline) {
+        const tooltip = document.getElementById('kline-tooltip');
+        if (!tooltip) return;
+        
+        const openEl = document.getElementById('tt-open');
+        const highEl = document.getElementById('tt-high');
+        const lowEl = document.getElementById('tt-low');
+        const closeEl = document.getElementById('tt-close');
+        const changeEl = document.getElementById('tt-change');
+        const changePercentEl = document.getElementById('tt-change-percent');
+        const amplitudeEl = document.getElementById('tt-amplitude');
+        const volumeEl = document.getElementById('tt-volume');
+        
+        if (!openEl) return;
+        
+        // 计算数值
+        const change = kline.close - kline.open;
+        const changePercent = (change / kline.open) * 100;
+        const amplitude = ((kline.high - kline.low) / kline.open) * 100;
+        
+        // 设置数值
+        openEl.textContent = kline.open.toFixed(2);
+        highEl.textContent = kline.high.toFixed(2);
+        lowEl.textContent = kline.low.toFixed(2);
+        closeEl.textContent = kline.close.toFixed(2);
+        
+        // 涨跌颜色
+        const isUp = kline.close >= kline.open;
+        changeEl.textContent = (change >= 0 ? '+' : '') + change.toFixed(2);
+        changeEl.style.color = isUp ? '#14b8a6' : '#f87171';
+        
+        changePercentEl.textContent = (changePercent >= 0 ? '+' : '') + changePercent.toFixed(2) + '%';
+        changePercentEl.style.color = isUp ? '#14b8a6' : '#f87171';
+        
+        amplitudeEl.textContent = amplitude.toFixed(2) + '%';
+        volumeEl.textContent = kline.volume?.toLocaleString() || '0';
+        
+        tooltip.style.display = 'block';
+        this.updateTooltipPosition();
+    }
+    
+    // 更新tooltip位置
+    updateTooltipPosition() {
+        const tooltip = document.getElementById('kline-tooltip');
+        if (!tooltip || tooltip.style.display === 'none' || this.lastMouseX === undefined) return;
+        
+        // 防止tooltip超出屏幕
+        let left = this.lastMouseX + 20;
+        let top = this.lastMouseY + 20;
+        
+        const tooltipRect = tooltip.getBoundingClientRect();
+        if (left + tooltipRect.width > window.innerWidth) {
+            left = this.lastMouseX - tooltipRect.width - 20;
+        }
+        if (top + tooltipRect.height > window.innerHeight) {
+            top = this.lastMouseY - tooltipRect.height - 20;
+        }
+        
+        tooltip.style.left = left + 'px';
+        tooltip.style.top = top + 'px';
+    }
+    
+    // 隐藏K线信息
+    hideKlineInfo() {
+        const tooltip = document.getElementById('kline-tooltip');
+        if (tooltip) {
+            tooltip.style.display = 'none';
         }
     }
 }
