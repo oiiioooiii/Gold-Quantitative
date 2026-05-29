@@ -22,7 +22,6 @@ class TradingWebSocket {
     init() {
         this.connect();
         this.initNavigation();
-        this.loadPage('dashboard');
         this.startServerTime();
     }
     
@@ -293,7 +292,8 @@ class TradingWebSocket {
                     // 初始化K线图
                     setTimeout(() => {
                         this.initKlineChart();
-                        // 不再需要HTTP轮询，WebSocket会推送数据
+                        // 加载初始数据
+                        this.loadCandlesForChart();
                     }, 100);
                 }
             })
@@ -585,20 +585,6 @@ class TradingWebSocket {
             this.volumeSeries.setData(volumeData);
         }
         
-        // 让两个图表都自动适配内容后再同步
-        setTimeout(() => {
-            this.mainChart.timeScale().fitContent();
-            if (this.volumeChart) {
-                this.volumeChart.timeScale().fitContent();
-                
-                // 然后完全对齐到主图的可视范围
-                const range = this.mainChart.timeScale().getVisibleRange();
-                if (range) {
-                    this.volumeChart.timeScale().setVisibleRange(range);
-                }
-            }
-        }, 50);
-        
         // ========== 更新MACD图 ==========
         if (this.macdChart) {
             const macdData = indicators.macd.macd.map((val, i) => ({
@@ -659,6 +645,28 @@ class TradingWebSocket {
             this.dSeries.setData(dData);
             this.jSeries.setData(jData);
         }
+        
+        // ========== 更新图表时间轴 ==========
+        setTimeout(() => {
+            // 让主图适应内容
+            this.mainChart.timeScale().fitContent();
+            
+            // 让其他图表也适应内容并同步范围
+            const otherCharts = [this.volumeChart, this.macdChart, this.rsiChart, this.kdjChart];
+            
+            // 延迟一下再获取可见范围，确保数据已加载
+            setTimeout(() => {
+                const range = this.mainChart.timeScale().getVisibleRange();
+                if (range) {
+                    otherCharts.forEach(chart => {
+                        if (chart) {
+                            chart.timeScale().fitContent();
+                            chart.timeScale().setVisibleRange(range);
+                        }
+                    });
+                }
+            }, 100);
+        }, 50);
     }
     
     convertTime(timeStr) {
@@ -743,6 +751,27 @@ class TradingWebSocket {
         } catch (error) {
             console.error('切换周期失败:', error);
             showToast('切换周期失败', 'error');
+        }
+    }
+
+    // 加载K线数据
+    async loadCandlesForChart() {
+        const timeframe = this.currentTimeframe || 'H1';
+        showToast(`正在刷新 ${timeframe} 周期数据...`, 'info');
+        
+        try {
+            const response = await fetch(`/api/indicators/XAUUSD/${timeframe}?count=200`);
+            const result = await response.json();
+            
+            if (result.success && result.candles) {
+                this.updateAllCharts(result.candles, result.indicators);
+                showToast('数据刷新成功', 'success');
+            } else {
+                showToast('获取数据失败', 'error');
+            }
+        } catch (error) {
+            console.error('加载数据失败:', error);
+            showToast('加载数据失败', 'error');
         }
     }
     
@@ -849,8 +878,20 @@ class TradingWebSocket {
 
 let wsClient = null;
 
+// 全局函数，用于刷新图表
+function loadCandlesForChart() {
+    if (wsClient && wsClient.loadCandlesForChart) {
+        wsClient.loadCandlesForChart();
+    }
+}
+
 document.addEventListener('DOMContentLoaded', () => {
     wsClient = new TradingWebSocket();
+    
+    // 初始化后加载仪表板
+    setTimeout(() => {
+        wsClient.loadPage('dashboard');
+    }, 100);
 });
 
 function quickTrade(action) {
