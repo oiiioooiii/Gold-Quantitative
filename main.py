@@ -98,27 +98,35 @@ class TradingBot:
             self.logger.info("正在初始化风控管理器...")
             self.risk_manager = RiskManager(self.config, self.mt5)
             
-            # 4. 初始化 AI 模型管理器
+            # 4. 初始化数据采集器（需要早于策略引擎）
+            self.logger.info("正在初始化数据采集器...")
+            self.data_collector = DataCollector(self.config, self.mt5)
+            
+            # 5. 初始化 AI 模型管理器
             self.logger.info("正在初始化 AI 模型管理器...")
             self.ai_manager = AIModelManager(self.config)
             
-            # 5. 初始化策略引擎
+            # 6. 初始化策略引擎（传递AI组件）
             self.logger.info("正在初始化策略引擎...")
             self.strategy_engine = StrategyEngine(
                 self.config,
                 self.mt5,
                 self.risk_manager,
-                self.notifier
+                self.notifier,
+                self.ai_manager,
+                self.data_collector
             )
             
-            # 6. 初始化企业级 Web 服务器
+            # 7. 初始化企业级 Web 服务器（传递AI组件）
             self.logger.info("正在初始化企业级 Web 服务器...")
-            self.webhook_server = EnterpriseWebServer(self.config, self.strategy_engine, self.mt5)
+            self.webhook_server = EnterpriseWebServer(
+                self.config, 
+                self.strategy_engine, 
+                self.mt5,
+                self.ai_manager,
+                self.data_collector
+            )
             self.webhook_server.start_push_loop()
-            
-            # 7. 初始化数据采集器
-            self.logger.info("正在初始化数据采集器...")
-            self.data_collector = DataCollector(self.config, self.mt5)
             
             self.logger.info("=" * 50)
             self.logger.info("系统初始化完成！")

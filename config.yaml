@@ -1,11 +1,50 @@
 ai:
-  enabled: false
+  deep_learning:
+    pytorch_enabled: false
+    tensorflow_enabled: false
+  dynamic_risk:
+    confidence_adjustment: true
+    enabled: true
+    use_market_regime: true
+  enabled: true
   feature_window: 100
+  llm:
+    api_key: sk-1c346b1f003b43c68d4581d387c9f23b
+    base_url: https://api.deepseek.com/v1
+    enabled: true
+    max_tokens: 100000000000
+    model: deepseek-v4-pro
+    provider: deepseek
+    temperature: 0.7
+    timeout: 30
+    use_for:
+      auto_trade: false
+      market_analysis: true
+      signal_analysis: true
   model_path: ./models/gold_trading_model.pth
+  signal_combination:
+    min_confidence: 0.4
+    use_weighted_average: true
+  tv_analyzer:
+    bb_period: 20
+    bb_std: 2
+    enabled: true
+    ma_long: 50
+    ma_medium: 20
+    ma_short: 5
+    macd_fast: 12
+    macd_signal: 9
+    macd_slow: 26
+    rsi_overbought: 70
+    rsi_oversold: 30
+    rsi_period: 14
 data_collection:
   collect_interval: 3600
-  enabled: false
+  enabled: true
   intervals:
+  - 1M
+  - 5M
+  - 15M
   - 1H
   - 4H
   - D1

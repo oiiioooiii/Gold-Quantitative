@@ -1132,7 +1132,31 @@ async function saveSettings() {
         lot_size: parseFloat(document.getElementById('config-lot')?.value || 0.1),
         max_lot: parseFloat(document.getElementById('config-max-lot')?.value || 1.0),
         sl_points: parseInt(document.getElementById('config-sl')?.value || 50),
-        tp_points: parseInt(document.getElementById('config-tp')?.value || 100)
+        tp_points: parseInt(document.getElementById('config-tp')?.value || 100),
+        ai_enabled: document.getElementById('ai-enabled')?.checked ?? true,
+        tv_enabled: document.getElementById('ai-tv-enabled')?.checked ?? true,
+        rsi_period: parseInt(document.getElementById('ai-rsi-period')?.value || 14),
+        rsi_oversold: parseInt(document.getElementById('ai-rsi-oversold')?.value || 30),
+        rsi_overbought: parseInt(document.getElementById('ai-rsi-overbought')?.value || 70),
+        macd_fast: parseInt(document.getElementById('ai-macd-fast')?.value || 12),
+        macd_slow: parseInt(document.getElementById('ai-macd-slow')?.value || 26),
+        macd_signal: parseInt(document.getElementById('ai-macd-signal')?.value || 9),
+        bb_period: parseInt(document.getElementById('ai-bb-period')?.value || 20),
+        bb_std: parseFloat(document.getElementById('ai-bb-std')?.value || 2.0),
+        min_confidence: parseFloat(document.getElementById('ai-min-confidence')?.value || 0.4),
+        use_weighted_average: document.getElementById('ai-use-weighted')?.checked ?? true,
+        dynamic_risk_enabled: document.getElementById('ai-dynamic-risk')?.checked ?? true,
+        llm_enabled: document.getElementById('llm-enabled')?.checked ?? false,
+        llm_provider: document.getElementById('llm-provider')?.value ?? 'openai',
+        llm_api_key: document.getElementById('llm-api-key')?.value ?? '',
+        llm_model: document.getElementById('llm-model')?.value ?? 'gpt-4',
+        llm_base_url: document.getElementById('llm-base-url')?.value ?? '',
+        llm_timeout: parseInt(document.getElementById('llm-timeout')?.value || 30),
+        llm_max_tokens: parseInt(document.getElementById('llm-max-tokens')?.value || 1000),
+        llm_temperature: parseFloat(document.getElementById('llm-temperature')?.value || 0.7),
+        llm_use_signal: document.getElementById('llm-use-signal')?.checked ?? false,
+        llm_use_market: document.getElementById('llm-use-market')?.checked ?? false,
+        llm_use_trade: document.getElementById('llm-use-trade')?.checked ?? false
     };
     
     try {
@@ -1197,8 +1221,230 @@ async function loadCandles() {
     }
 }
 
-function loadCandlesForChart() {
-    if (wsClient && wsClient.loadCandlesForChart) {
-        wsClient.loadCandlesForChart();
+// ========== AI相关功能 ==========
+
+let lastAIAnalysis = null;
+let aiRefreshInterval = null;
+
+async function refreshAIAnalysis() {
+    const signalIndicator = document.getElementById('ai-signal-indicator');
+    const signalText = document.getElementById('ai-signal-text');
+    const signalConfidence = document.getElementById('ai-signal-confidence');
+    const recLot = document.getElementById('ai-rec-lot');
+    const recSl = document.getElementById('ai-rec-sl');
+    const recTp = document.getElementById('ai-rec-tp');
+    const marketRegime = document.getElementById('ai-market-regime');
+    const aiReason = document.getElementById('ai-reason');
+    const buyBtn = document.getElementById('ai-buy-btn');
+    const sellBtn = document.getElementById('ai-sell-btn');
+    
+    if (!signalIndicator) return; // 元素可能不存在
+    
+    try {
+        // 显示加载状态
+        signalIndicator.className = 'display-4 text-warning';
+        signalIndicator.innerHTML = '<i class="fas fa-circle-notch fa-spin"></i>';
+        signalText.textContent = '分析中...';
+        
+        const response = await fetch('/api/ai/analysis');
+        const result = await response.json();
+        
+        lastAIAnalysis = result;
+        
+        if (!result.enabled) {
+            // AI未启用
+            signalIndicator.className = 'display-4 text-secondary';
+            signalIndicator.innerHTML = '<i class="fas fa-circle"></i>';
+            signalText.textContent = 'AI未启用';
+            signalConfidence.textContent = '置信度: --';
+            recLot.textContent = '--';
+            recSl.textContent = '--';
+            recTp.textContent = '--';
+            marketRegime.textContent = '--';
+            aiReason.textContent = result.error || 'AI功能未启用';
+            buyBtn.disabled = true;
+            sellBtn.disabled = true;
+            return;
+        }
+        
+        if (result.error) {
+            signalIndicator.className = 'display-4 text-danger';
+            signalIndicator.innerHTML = '<i class="fas fa-exclamation-triangle"></i>';
+            signalText.textContent = '分析失败';
+            aiReason.textContent = result.error;
+            return;
+        }
+        
+        // 更新信号显示
+        const signal = result.combined_signal;
+        const riskParams = result.risk_params;
+        
+        if (signal) {
+            // 更新信号指示器
+            updateSignalIndicator(signal, signalIndicator, signalText, signalConfidence);
+            
+            // 更新按钮状态
+            updateTradeButtons(signal, buyBtn, sellBtn, riskParams);
+        }
+        
+        // 更新推荐参数
+        if (riskParams) {
+            recLot.textContent = riskParams.lot ? riskParams.lot.toFixed(2) : '--';
+            recSl.textContent = riskParams.sl_points || '--';
+            recTp.textContent = riskParams.tp_points || '--';
+            marketRegime.textContent = getRegimeText(riskParams.regime);
+        }
+        
+        // 更新原因
+        aiReason.textContent = signal?.reason || '暂无分析';
+        
+    } catch (error) {
+        console.error('AI分析刷新失败:', error);
+        signalIndicator.className = 'display-4 text-danger';
+        signalIndicator.innerHTML = '<i class="fas fa-exclamation-circle"></i>';
+        signalText.textContent = '分析失败';
+        aiReason.textContent = '网络错误';
+    }
+    
+    // 更新 LLM 分析
+    const llmStatus = document.getElementById('llm-status');
+    const llmResult = document.getElementById('llm-result');
+    const llmLoading = document.getElementById('llm-loading');
+    
+    if (llmStatus && llmResult && lastAIAnalysis) {
+        if (lastAIAnalysis.llm_enabled) {
+            llmStatus.className = 'badge bg-success text-white small';
+            llmStatus.textContent = '已启用';
+            
+            if (lastAIAnalysis.llm_analysis) {
+                llmLoading.style.display = 'none';
+                llmResult.style.display = 'block';
+                llmResult.innerHTML = `<div class="llm-analysis-content">${lastAIAnalysis.llm_analysis.replace(/\n/g, '<br>')}</div>`;
+            } else {
+                llmLoading.style.display = 'none';
+                llmResult.style.display = 'block';
+                llmResult.innerHTML = '<p class="text-muted text-center">暂无 LLM 分析</p>';
+            }
+        } else {
+            llmStatus.className = 'badge bg-secondary text-white small';
+            llmStatus.textContent = '未配置';
+            llmLoading.style.display = 'none';
+            llmResult.style.display = 'block';
+            llmResult.innerHTML = '<p class="text-muted text-center">请先在系统设置中配置 LLM</p>';
+        }
     }
 }
+
+function updateSignalIndicator(signal, indicatorEl, textEl, confidenceEl) {
+    const signalType = signal.signal_type;
+    const confidence = signal.confidence || 0;
+    const strength = signal.strength || 3;
+    
+    // 设置指示器颜色
+    if (signalType === 'buy') {
+        indicatorEl.className = 'display-4 text-success';
+        indicatorEl.innerHTML = '<i class="fas fa-arrow-up"></i>';
+        textEl.textContent = '做多信号';
+    } else if (signalType === 'sell') {
+        indicatorEl.className = 'display-4 text-danger';
+        indicatorEl.innerHTML = '<i class="fas fa-arrow-down"></i>';
+        textEl.textContent = '做空信号';
+    } else {
+        indicatorEl.className = 'display-4 text-secondary';
+        indicatorEl.innerHTML = '<i class="fas fa-pause"></i>';
+        textEl.textContent = '观望';
+    }
+    
+    // 显示置信度
+    confidenceEl.textContent = `置信度: ${(confidence * 100).toFixed(1)}% | 强度: ${getStrengthText(strength)}`;
+}
+
+function updateTradeButtons(signal, buyBtn, sellBtn, riskParams) {
+    const signalType = signal.signal_type;
+    const confidence = signal.confidence || 0;
+    const allowTrade = riskParams?.allow_trade ?? true;
+    
+    // 只有信号足够强且允许交易时才启用按钮
+    const isBuyEnabled = signalType === 'buy' && confidence >= 0.4 && allowTrade;
+    const isSellEnabled = signalType === 'sell' && confidence >= 0.4 && allowTrade;
+    
+    buyBtn.disabled = !isBuyEnabled;
+    sellBtn.disabled = !isSellEnabled;
+    
+    // 添加活跃状态样式
+    buyBtn.classList.toggle('btn-success', isBuyEnabled);
+    buyBtn.classList.toggle('btn-outline-success', !isBuyEnabled);
+    sellBtn.classList.toggle('btn-danger', isSellEnabled);
+    sellBtn.classList.toggle('btn-outline-danger', !isSellEnabled);
+}
+
+function getStrengthText(strength) {
+    const strengthMap = {
+        1: '极弱',
+        2: '较弱',
+        3: '中等',
+        4: '较强',
+        5: '极强'
+    };
+    return strengthMap[strength] || '未知';
+}
+
+function getRegimeText(regime) {
+    const regimeMap = {
+        'high_volatility': '高波动',
+        'low_volatility': '低波动',
+        'trending': '趋势',
+        'ranging': '震荡',
+        'unknown': '未知'
+    };
+    return regimeMap[regime] || regime || '--';
+}
+
+async function executeAITrade(action) {
+    showToast(`正在执行AI指导的${action === 'buy' ? '做多' : '做空'}...`, 'info');
+    
+    try {
+        const response = await fetch('/api/ai/trade', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                symbol: 'XAUUSD',
+                action: action.toUpperCase()
+            })
+        });
+        
+        const result = await response.json();
+        
+        if (result.success) {
+            showToast(`AI指导交易成功: ${result.message}`, 'success');
+        } else {
+            showToast(`AI指导交易失败: ${result.message}`, 'error');
+        }
+    } catch (error) {
+        console.error('AI交易执行失败:', error);
+        showToast('AI指导交易执行失败', 'error');
+    }
+}
+
+// 自动刷新AI分析（每30秒）
+function startAIRefresh() {
+    if (aiRefreshInterval) {
+        clearInterval(aiRefreshInterval);
+    }
+    
+    // 立即刷新一次
+    refreshAIAnalysis();
+    
+    // 设置定时刷新
+    aiRefreshInterval = setInterval(() => {
+        refreshAIAnalysis();
+    }, 30000);
+}
+
+// 页面加载后启动AI刷新
+document.addEventListener('DOMContentLoaded', () => {
+    // 延迟启动，等待其他组件初始化
+    setTimeout(() => {
+        startAIRefresh();
+    }, 2000);
+});

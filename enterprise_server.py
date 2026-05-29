@@ -63,10 +63,12 @@ class ConnectionManager:
 class EnterpriseWebServer:
     """企业级Web服务器 - 支持WebSocket实时通讯"""
     
-    def __init__(self, config: Dict[str, Any], strategy_engine, mt5_interface):
+    def __init__(self, config: Dict[str, Any], strategy_engine, mt5_interface, ai_model_manager=None, data_collector=None):
         self.config = config
         self.strategy_engine = strategy_engine
         self.mt5_interface = mt5_interface
+        self.ai_model_manager = ai_model_manager
+        self.data_collector = data_collector
         self.logger = get_logger()
         self.trading_config = config.get('trading', {})
         
@@ -396,6 +398,106 @@ class EnterpriseWebServer:
                 "count": len(orders)
             }
         
+        # ========== AI功能API ==========
+        
+        def safe_json_serialize(obj):
+            """安全地将对象转换为JSON可序列化格式"""
+            import numpy as np
+            
+            if isinstance(obj, dict):
+                return {key: safe_json_serialize(value) for key, value in obj.items()}
+            elif isinstance(obj, list):
+                return [safe_json_serialize(item) for item in obj]
+            elif isinstance(obj, np.integer):
+                return int(obj)
+            elif isinstance(obj, np.floating):
+                return float(obj)
+            elif isinstance(obj, np.ndarray):
+                return obj.tolist()
+            elif isinstance(obj, np.bool_):
+                return bool(obj)
+            return obj
+        
+        # 获取AI分析
+        @self.app.get("/api/ai/analysis")
+        async def get_ai_analysis(symbol: str = "XAUUSD"):
+            """获取AI分析结果"""
+            try:
+                if self.strategy_engine:
+                    result = self.strategy_engine.get_ai_analysis(symbol)
+                    # 确保所有类型安全
+                    return safe_json_serialize(result)
+                else:
+                    return {"enabled": False, "error": "策略引擎未初始化"}
+            except Exception as e:
+                self.logger.error(f"获取AI分析失败: {e}")
+                import traceback
+                self.logger.error(f"堆栈跟踪: {traceback.format_exc()}")
+                return {"enabled": False, "error": str(e)}
+        
+        # 获取AI信号
+        @self.app.get("/api/ai/signal")
+        async def get_ai_signal(symbol: str = "XAUUSD"):
+            """获取AI交易信号"""
+            try:
+                if not self.ai_model_manager or not self.data_collector:
+                    return {"success": False, "message": "AI组件未初始化"}
+                
+                features = self.data_collector.get_ai_features(symbol)
+                combined_signal = self.ai_model_manager.get_combined_signal(features)
+                
+                if combined_signal:
+                    return {
+                        "success": True,
+                        "signal": combined_signal.to_dict()
+                    }
+                else:
+                    return {"success": False, "message": "无法生成信号"}
+            except Exception as e:
+                self.logger.error(f"获取AI信号失败: {e}")
+                return {"success": False, "error": str(e)}
+        
+        # 执行AI指导的交易
+        @self.app.post("/api/ai/trade")
+        async def ai_trade(request: Request):
+            """执行AI指导的交易"""
+            try:
+                data = await request.json()
+                symbol = data.get('symbol', 'XAUUSD')
+                action = data.get('action', '').upper()
+                
+                if action not in ['BUY', 'SELL']:
+                    return {"success": False, "message": "无效的操作类型"}
+                
+                # 获取AI分析
+                if self.strategy_engine:
+                    ai_analysis = self.strategy_engine.get_ai_analysis(symbol)
+                    
+                    # 构建信号
+                    signal = {
+                        'symbol': symbol,
+                        'action': action,
+                        'strategy': 'AI_Trading',
+                        'use_ai': True
+                    }
+                    
+                    # 如果AI分析有风险参数，应用它们
+                    if ai_analysis.get('enabled') and ai_analysis.get('risk_params'):
+                        risk_params = ai_analysis['risk_params']
+                        signal['lot'] = risk_params.get('lot')
+                        signal['sl_points'] = risk_params.get('sl_points')
+                        signal['tp_points'] = risk_params.get('tp_points')
+                        signal['confidence'] = ai_analysis.get('combined_signal', {}).get('confidence', 0.5)
+                    
+                    # 处理信号
+                    success, message, result = self.strategy_engine.process_signal(signal)
+                    return {"success": success, "message": message, "result": result}
+                else:
+                    return {"success": False, "message": "策略引擎未初始化"}
+            except Exception as e:
+                self.logger.error(f"AI交易执行失败: {e}")
+                return {"success": False, "error": str(e)}
+        
         # ========== 交易API ==========
         
         # 执行交易
@@ -496,6 +598,7 @@ class EnterpriseWebServer:
                 else:
                     config = {}
                 
+                # 保存交易配置
                 if 'trading' not in config:
                     config['trading'] = {}
                 
@@ -508,12 +611,90 @@ class EnterpriseWebServer:
                 if 'tp_points' in settings:
                     config['trading']['tp_points'] = settings['tp_points']
                 
+                # 保存 AI 配置
+                if 'ai' not in config:
+                    config['ai'] = {}
+                
+                if 'ai_enabled' in settings:
+                    config['ai']['enabled'] = settings['ai_enabled']
+                
+                if 'tv_analyzer' not in config['ai']:
+                    config['ai']['tv_analyzer'] = {}
+                
+                if 'tv_enabled' in settings:
+                    config['ai']['tv_analyzer']['enabled'] = settings['tv_enabled']
+                if 'rsi_period' in settings:
+                    config['ai']['tv_analyzer']['rsi_period'] = settings['rsi_period']
+                if 'rsi_oversold' in settings:
+                    config['ai']['tv_analyzer']['rsi_oversold'] = settings['rsi_oversold']
+                if 'rsi_overbought' in settings:
+                    config['ai']['tv_analyzer']['rsi_overbought'] = settings['rsi_overbought']
+                if 'macd_fast' in settings:
+                    config['ai']['tv_analyzer']['macd_fast'] = settings['macd_fast']
+                if 'macd_slow' in settings:
+                    config['ai']['tv_analyzer']['macd_slow'] = settings['macd_slow']
+                if 'macd_signal' in settings:
+                    config['ai']['tv_analyzer']['macd_signal'] = settings['macd_signal']
+                if 'bb_period' in settings:
+                    config['ai']['tv_analyzer']['bb_period'] = settings['bb_period']
+                if 'bb_std' in settings:
+                    config['ai']['tv_analyzer']['bb_std'] = settings['bb_std']
+                
+                if 'signal_combination' not in config['ai']:
+                    config['ai']['signal_combination'] = {}
+                
+                if 'min_confidence' in settings:
+                    config['ai']['signal_combination']['min_confidence'] = settings['min_confidence']
+                if 'use_weighted_average' in settings:
+                    config['ai']['signal_combination']['use_weighted_average'] = settings['use_weighted_average']
+                
+                if 'dynamic_risk' not in config['ai']:
+                    config['ai']['dynamic_risk'] = {}
+                
+                if 'dynamic_risk_enabled' in settings:
+                    config['ai']['dynamic_risk']['enabled'] = settings['dynamic_risk_enabled']
+                
+                # 保存 LLM 配置
+                if 'llm' not in config['ai']:
+                    config['ai']['llm'] = {}
+                
+                if 'llm_enabled' in settings:
+                    config['ai']['llm']['enabled'] = settings['llm_enabled']
+                if 'llm_provider' in settings:
+                    config['ai']['llm']['provider'] = settings['llm_provider']
+                if 'llm_api_key' in settings:
+                    config['ai']['llm']['api_key'] = settings['llm_api_key']
+                if 'llm_model' in settings:
+                    config['ai']['llm']['model'] = settings['llm_model']
+                if 'llm_base_url' in settings:
+                    config['ai']['llm']['base_url'] = settings['llm_base_url']
+                if 'llm_timeout' in settings:
+                    config['ai']['llm']['timeout'] = settings['llm_timeout']
+                if 'llm_max_tokens' in settings:
+                    config['ai']['llm']['max_tokens'] = settings['llm_max_tokens']
+                if 'llm_temperature' in settings:
+                    config['ai']['llm']['temperature'] = settings['llm_temperature']
+                
+                if 'use_for' not in config['ai']['llm']:
+                    config['ai']['llm']['use_for'] = {}
+                
+                if 'llm_use_signal' in settings:
+                    config['ai']['llm']['use_for']['signal_analysis'] = settings['llm_use_signal']
+                if 'llm_use_market' in settings:
+                    config['ai']['llm']['use_for']['market_analysis'] = settings['llm_use_market']
+                if 'llm_use_trade' in settings:
+                    config['ai']['llm']['use_for']['auto_trade'] = settings['llm_use_trade']
+                
                 with open(config_path, 'w', encoding='utf-8') as f:
                     yaml.dump(config, f, allow_unicode=True, default_flow_style=False)
                 
                 # 更新当前配置
                 if hasattr(self, 'trading_config'):
                     self.trading_config.update(config.get('trading', {}))
+                
+                # 更新 AI 模型管理器配置
+                if self.ai_model_manager:
+                    self.ai_model_manager.update_config(config.get('ai', {}))
                 
                 self.logger.info(f"设置保存成功: {settings}")
                 return {"success": True, "message": "设置保存成功"}
@@ -961,6 +1142,103 @@ class EnterpriseWebServer:
         </div>
     </div>
     
+    <!-- AI智能分析模块 -->
+    <div class="row mb-3">
+        <div class="col-md-12">
+            <div class="card">
+                <div class="card-header bg-gradient text-white py-2 d-flex justify-content-between align-items-center" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);">
+                    <h6 class="mb-0"><i class="fas fa-robot"></i> AI智能分析</h6>
+                    <button class="btn btn-light btn-sm" onclick="refreshAIAnalysis()">
+                        <i class="fas fa-sync-alt"></i> 刷新
+                    </button>
+                </div>
+                <div class="card-body py-3">
+                    <div class="row">
+                        <!-- AI信号显示 -->
+                        <div class="col-md-4">
+                            <div class="text-center">
+                                <h6 class="text-muted mb-2">AI交易信号</h6>
+                                <div id="ai-signal-indicator" class="display-4 text-secondary">
+                                    <i class="fas fa-circle"></i>
+                                </div>
+                                <div id="ai-signal-text" class="h5 mb-1">等待分析...</div>
+                                <div id="ai-signal-confidence" class="text-muted small">置信度: --</div>
+                            </div>
+                        </div>
+                        <!-- AI推荐参数 -->
+                        <div class="col-md-4">
+                            <h6 class="text-muted mb-2">推荐交易参数</h6>
+                            <div class="row g-2">
+                                <div class="col-6">
+                                    <div class="card bg-light p-2">
+                                        <small class="text-muted">推荐手数</small>
+                                        <div id="ai-rec-lot" class="h5 mb-0">--</div>
+                                    </div>
+                                </div>
+                                <div class="col-6">
+                                    <div class="card bg-light p-2">
+                                        <small class="text-muted">止损点数</small>
+                                        <div id="ai-rec-sl" class="h5 mb-0">--</div>
+                                    </div>
+                                </div>
+                                <div class="col-6">
+                                    <div class="card bg-light p-2">
+                                        <small class="text-muted">止盈点数</small>
+                                        <div id="ai-rec-tp" class="h5 mb-0">--</div>
+                                    </div>
+                                </div>
+                                <div class="col-6">
+                                    <div class="card bg-light p-2">
+                                        <small class="text-muted">市场状态</small>
+                                        <div id="ai-market-regime" class="h5 mb-0">--</div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <!-- AI操作按钮 -->
+                        <div class="col-md-4">
+                            <h6 class="text-muted mb-2">AI辅助交易</h6>
+                            <div class="d-grid gap-2">
+                                <button id="ai-buy-btn" class="btn btn-success" onclick="executeAITrade('buy')" disabled>
+                                    <i class="fas fa-arrow-up"></i> AI指导做多
+                                </button>
+                                <button id="ai-sell-btn" class="btn btn-danger" onclick="executeAITrade('sell')" disabled>
+                                    <i class="fas fa-arrow-down"></i> AI指导做空
+                                </button>
+                            </div>
+                            <div id="ai-reason" class="mt-2 small text-muted text-center">
+                                --
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- LLM 智能分析模块 -->
+    <div class="row mb-3">
+        <div class="col-md-12">
+            <div class="card">
+                <div class="card-header bg-gradient text-white py-2 d-flex justify-content-between align-items-center" style="background: linear-gradient(135deg, #8B5CF6 0%, #EC4899 100%);">
+                    <h6 class="mb-0"><i class="fas fa-brain"></i> LLM 深度分析</h6>
+                    <span id="llm-status" class="badge bg-light text-dark small">未配置</span>
+                </div>
+                <div class="card-body py-3">
+                    <div id="llm-analysis-container">
+                        <div id="llm-loading" class="text-center text-muted py-4" style="display: none;">
+                            <i class="fas fa-spinner fa-spin fa-2x mb-3"></i>
+                            <p>正在获取 LLM 分析...</p>
+                        </div>
+                        <div id="llm-result" class="llm-analysis">
+                            <p class="text-muted text-center">请先在系统设置中配置 LLM</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
     <div class="row mb-3">
         <div class="col-md-12">
             <div class="card">
@@ -1181,11 +1459,42 @@ class EnterpriseWebServer:
         sl_points = self.trading_config.get('sl_points', 50)
         tp_points = self.trading_config.get('tp_points', 100)
         
+        # AI配置
+        ai_config = self.config.get('ai', {})
+        ai_enabled = ai_config.get('enabled', True)
+        tv_enabled = ai_config.get('tv_analyzer', {}).get('enabled', True)
+        rsi_period = ai_config.get('tv_analyzer', {}).get('rsi_period', 14)
+        rsi_oversold = ai_config.get('tv_analyzer', {}).get('rsi_oversold', 30)
+        rsi_overbought = ai_config.get('tv_analyzer', {}).get('rsi_overbought', 70)
+        macd_fast = ai_config.get('tv_analyzer', {}).get('macd_fast', 12)
+        macd_slow = ai_config.get('tv_analyzer', {}).get('macd_slow', 26)
+        macd_signal = ai_config.get('tv_analyzer', {}).get('macd_signal', 9)
+        bb_period = ai_config.get('tv_analyzer', {}).get('bb_period', 20)
+        bb_std = ai_config.get('tv_analyzer', {}).get('bb_std', 2.0)
+        min_confidence = ai_config.get('signal_combination', {}).get('min_confidence', 0.4)
+        use_weighted_average = ai_config.get('signal_combination', {}).get('use_weighted_average', True)
+        dynamic_risk_enabled = ai_config.get('dynamic_risk', {}).get('enabled', True)
+        
+        # LLM配置
+        llm_config = ai_config.get('llm', {})
+        llm_enabled = llm_config.get('enabled', False)
+        llm_provider = llm_config.get('provider', 'openai')
+        llm_api_key = llm_config.get('api_key', '')
+        llm_model = llm_config.get('model', 'gpt-4')
+        llm_base_url = llm_config.get('base_url', '')
+        llm_timeout = llm_config.get('timeout', 30)
+        llm_max_tokens = llm_config.get('max_tokens', 1000)
+        llm_temperature = llm_config.get('temperature', 0.7)
+        llm_use_signal = llm_config.get('use_for', {}).get('signal_analysis', False)
+        llm_use_market = llm_config.get('use_for', {}).get('market_analysis', False)
+        llm_use_trade = llm_config.get('use_for', {}).get('auto_trade', False)
+        
         return f"""
 <div id="page-settings" class="page-content">
     <h2 class="mb-4"><i class="fas fa-cog"></i> 系统设置</h2>
     
-    <div class="card">
+    <!-- 交易参数设置 -->
+    <div class="card mb-4">
         <div class="card-header bg-dark text-white">
             <h5><i class="fas fa-sliders-h"></i> 交易参数</h5>
         </div>
@@ -1212,10 +1521,215 @@ class EnterpriseWebServer:
                     </div>
                 </div>
             </div>
-            <button class="btn btn-primary btn-lg w-100" onclick="saveSettings()">
-                <i class="fas fa-save"></i> 保存设置
-            </button>
         </div>
     </div>
+    
+    <!-- AI 模型设置 -->
+    <div class="card mb-4">
+        <div class="card-header bg-gradient text-white" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);">
+            <h5><i class="fas fa-robot"></i> AI 模型设置</h5>
+        </div>
+        <div class="card-body">
+            <!-- AI 总开关 -->
+            <div class="mb-4">
+                <div class="form-check form-switch">
+                    <input class="form-check-input" type="checkbox" id="ai-enabled" {"checked" if ai_enabled else ""}>
+                    <label class="form-check-label">启用 AI 功能</label>
+                </div>
+            </div>
+            
+            <!-- TradingView 风格 AI 分析器 -->
+            <div class="row mb-3">
+                <div class="col-md-12">
+                    <div class="form-check form-switch mb-3">
+                        <input class="form-check-input" type="checkbox" id="ai-tv-enabled" {"checked" if tv_enabled else ""}>
+                        <label class="form-check-label"><i class="fas fa-chart-line"></i> TradingView 风格技术分析</label>
+                    </div>
+                </div>
+            </div>
+            
+            <hr>
+            <h6 class="mb-3"><i class="fas fa-cog"></i> 技术指标参数</h6>
+            
+            <div class="row">
+                <div class="col-md-4">
+                    <div class="mb-3">
+                        <label>RSI 周期</label>
+                        <input type="number" class="form-control" id="ai-rsi-period" value="{rsi_period}" min="2" max="50">
+                    </div>
+                </div>
+                <div class="col-md-4">
+                    <div class="mb-3">
+                        <label>RSI 超卖线</label>
+                        <input type="number" class="form-control" id="ai-rsi-oversold" value="{rsi_oversold}" min="10" max="40">
+                    </div>
+                </div>
+                <div class="col-md-4">
+                    <div class="mb-3">
+                        <label>RSI 超买线</label>
+                        <input type="number" class="form-control" id="ai-rsi-overbought" value="{rsi_overbought}" min="60" max="90">
+                    </div>
+                </div>
+            </div>
+            
+            <div class="row">
+                <div class="col-md-4">
+                    <div class="mb-3">
+                        <label>MACD 快线周期</label>
+                        <input type="number" class="form-control" id="ai-macd-fast" value="{macd_fast}" min="5" max="20">
+                    </div>
+                </div>
+                <div class="col-md-4">
+                    <div class="mb-3">
+                        <label>MACD 慢线周期</label>
+                        <input type="number" class="form-control" id="ai-macd-slow" value="{macd_slow}" min="20" max="50">
+                    </div>
+                </div>
+                <div class="col-md-4">
+                    <div class="mb-3">
+                        <label>MACD 信号线周期</label>
+                        <input type="number" class="form-control" id="ai-macd-signal" value="{macd_signal}" min="5" max="20">
+                    </div>
+                </div>
+            </div>
+            
+            <div class="row">
+                <div class="col-md-6">
+                    <div class="mb-3">
+                        <label>布林带周期</label>
+                        <input type="number" class="form-control" id="ai-bb-period" value="{bb_period}" min="5" max="50">
+                    </div>
+                </div>
+                <div class="col-md-6">
+                    <div class="mb-3">
+                        <label>布林带标准差</label>
+                        <input type="number" class="form-control" id="ai-bb-std" value="{bb_std}" step="0.1" min="0.5" max="4">
+                    </div>
+                </div>
+            </div>
+            
+            <hr>
+            <h6 class="mb-3"><i class="fas fa-sync"></i> 信号融合参数</h6>
+            
+            <div class="row">
+                <div class="col-md-6">
+                    <div class="mb-3">
+                        <label>最小置信度阈值</label>
+                        <input type="number" class="form-control" id="ai-min-confidence" value="{min_confidence}" step="0.05" min="0.1" max="0.9">
+                    </div>
+                </div>
+                <div class="col-md-6">
+                    <div class="mb-3">
+                        <div class="form-check form-switch mt-4">
+                            <input class="form-check-input" type="checkbox" id="ai-use-weighted" {"checked" if use_weighted_average else ""}>
+                            <label class="form-check-label">使用加权平均融合</label>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <hr>
+            <h6 class="mb-3"><i class="fas fa-shield-alt"></i> 动态风控设置</h6>
+            
+            <div class="form-check form-switch mb-3">
+                <input class="form-check-input" type="checkbox" id="ai-dynamic-risk" {"checked" if dynamic_risk_enabled else ""}>
+                <label class="form-check-label">启用 AI 动态风控</label>
+            </div>
+        </div>
+    </div>
+    
+    <!-- LLM 大语言模型设置 -->
+    <div class="card mb-4">
+        <div class="card-header bg-gradient text-white" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);">
+            <h5><i class="fas fa-brain"></i> 大语言模型(LLM)设置</h5>
+        </div>
+        <div class="card-body">
+            <div class="form-check form-switch mb-4">
+                <input class="form-check-input" type="checkbox" id="llm-enabled" {"checked" if llm_enabled else ""}>
+                <label class="form-check-label">启用 LLM AI</label>
+            </div>
+            
+            <div class="row">
+                <div class="col-md-6">
+                    <div class="mb-3">
+                        <label><i class="fas fa-robot"></i> AI 提供商</label>
+                        <select class="form-select" id="llm-provider">
+                            <option value="openai" {"selected" if llm_provider == "openai" else ""}>OpenAI (GPT)</option>
+                            <option value="anthropic" {"selected" if llm_provider == "anthropic" else ""}>Anthropic (Claude)</option>
+                            <option value="deepseek" {"selected" if llm_provider == "deepseek" else ""}>DeepSeek</option>
+                            <option value="siliconflow" {"selected" if llm_provider == "siliconflow" else ""}>硅基流动</option>
+                            <option value="tongyi" {"selected" if llm_provider == "tongyi" else ""}>通义千问</option>
+                            <option value="custom" {"selected" if llm_provider == "custom" else ""}>自定义</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="col-md-6">
+                    <div class="mb-3">
+                        <label><i class="fas fa-cube"></i> 模型名称</label>
+                        <input type="text" class="form-control" id="llm-model" value="{llm_model}" placeholder="gpt-4 / claude-3-opus / deepseek-chat">
+                    </div>
+                </div>
+            </div>
+            
+            <div class="mb-3">
+                <label><i class="fas fa-key"></i> API Key</label>
+                <input type="password" class="form-control" id="llm-api-key" value="{llm_api_key}" placeholder="输入您的 API Key">
+            </div>
+            
+            <div class="mb-3">
+                <label><i class="fas fa-link"></i> Base URL (可选)</label>
+                <input type="text" class="form-control" id="llm-base-url" value="{llm_base_url}" placeholder="https://api.openai.com/v1">
+            </div>
+            
+            <div class="row">
+                <div class="col-md-4">
+                    <div class="mb-3">
+                        <label><i class="fas fa-clock"></i> 超时时间(秒)</label>
+                        <input type="number" class="form-control" id="llm-timeout" value="{llm_timeout}" min="5" max="300">
+                    </div>
+                </div>
+                <div class="col-md-4">
+                    <div class="mb-3">
+                        <label><i class="fas fa-comment"></i> 最大 Token</label>
+                        <input type="number" class="form-control" id="llm-max-tokens" value="{llm_max_tokens}" min="100" max="10000">
+                    </div>
+                </div>
+                <div class="col-md-4">
+                    <div class="mb-3">
+                        <label><i class="fas fa-temperature-high"></i> 温度</label>
+                        <input type="number" class="form-control" id="llm-temperature" value="{llm_temperature}" step="0.1" min="0" max="2">
+                    </div>
+                </div>
+            </div>
+            
+            <hr>
+            <h6 class="mb-3"><i class="fas fa-lightbulb"></i> LLM 应用场景</h6>
+            
+            <div class="row">
+                <div class="col-md-4">
+                    <div class="form-check mb-2">
+                        <input class="form-check-input" type="checkbox" id="llm-use-signal" {"checked" if llm_use_signal else ""}>
+                        <label class="form-check-label">信号分析</label>
+                    </div>
+                </div>
+                <div class="col-md-4">
+                    <div class="form-check mb-2">
+                        <input class="form-check-input" type="checkbox" id="llm-use-market" {"checked" if llm_use_market else ""}>
+                        <label class="form-check-label">市场分析</label>
+                    </div>
+                </div>
+                <div class="col-md-4">
+                    <div class="form-check mb-2">
+                        <input class="form-check-input" type="checkbox" id="llm-use-trade" {"checked" if llm_use_trade else ""}>
+                        <label class="form-check-label">自动交易</label>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <button class="btn btn-primary btn-lg w-100" onclick="saveSettings()">
+        <i class="fas fa-save"></i> 保存所有设置
+    </button>
 </div>
 """
