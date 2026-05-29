@@ -17,6 +17,9 @@ PyYAML>=6.0
 # HTTP 请求（用于 Telegram 通知）
 requests>=2.31.0
 
+# OpenAI SDK（用于 LLM API 调用）
+openai>=1.0.0
+
 # AI 相关（可选）
 # torch>=2.0.0
 # scikit-learn>=1.3.0

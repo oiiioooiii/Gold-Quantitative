@@ -158,6 +158,11 @@ class TradingBot:
             )
             self.data_collection_thread.start()
         
+        # 启动后台自动分析线程
+        if self.strategy_engine:
+            self.logger.info("启动后台自动分析线程...")
+            self.strategy_engine.start_auto_analysis()
+        
         # 启动 Webhook 服务器
         webhook_config = self.config.get('webhook', {})
         host = webhook_config.get('host', '0.0.0.0')
@@ -185,6 +190,11 @@ class TradingBot:
         
         self.logger.info("正在停止系统...")
         self.running = False
+        
+        # 停止后台自动分析线程
+        if self.strategy_engine:
+            self.logger.info("停止后台自动分析线程...")
+            self.strategy_engine.stop_auto_analysis()
         
         # 停止 WebSocket 推送循环
         if self.webhook_server:

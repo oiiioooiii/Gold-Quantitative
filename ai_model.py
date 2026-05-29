@@ -9,6 +9,13 @@ from typing import Dict, Any, Optional, List, Tuple
 from abc import ABC, abstractmethod
 from enum import Enum
 from utils.logger import get_logger
+from llm_database import get_llm_database
+
+try:
+    from openai import OpenAI
+    OPENAI_SDK_AVAILABLE = True
+except ImportError:
+    OPENAI_SDK_AVAILABLE = False
 
 
 class SignalType(Enum):
@@ -495,54 +502,30 @@ class AIModelManager:
         self.config = config
         self.logger = get_logger()
         self.ai_config = config.get('ai', {})
-        self.enabled = self.ai_config.get('enabled', False)
+        self.enabled = True  # 始终启用，因为我们只使用 LLM
         
         # 初始化各个AI模型
         self.models = {}
         self.active_models = []
         
-        if self.enabled:
-            self._initialize_models()
+        self._initialize_models()
     
     def _initialize_models(self):
         """初始化所有AI模型"""
-        # 1. TradingView AI（始终启用）
-        tv_config = self.ai_config.get('tv_analyzer', {})
-        if tv_config.get('enabled', True):
-            tv_model = TradingViewAIAnalyzer()
-            tv_model.update_config(tv_config)
-            self.models['tradingview'] = tv_model
-            self.active_models.append('tradingview')
-            self.logger.info("TradingView AI初始化成功")
-        
-        # 2. LLM AI
+        # LLM AI（主要功能）
         llm_config = self.ai_config.get('llm', {})
-        if llm_config.get('enabled', False) and llm_config.get('api_key'):
-            llm_model = LLMAIAnalyzer()
-            llm_model.update_config(llm_config)
-            self.models['llm'] = llm_model
+        llm_enabled = llm_config.get('enabled', False)
+        
+        # 始终初始化 LLM 模型，以便前端可以检查配置状态
+        llm_model = LLMAIAnalyzer()
+        llm_model.update_config(llm_config)
+        self.models['llm'] = llm_model
+        
+        if llm_enabled and llm_config.get('api_key'):
             self.active_models.append('llm')
             self.logger.info("LLM AI初始化成功")
-        
-        # 3. PyTorch模型
-        pytorch_config = self.ai_config.get('deep_learning', {}).get('pytorch', {})
-        if pytorch_config.get('enabled', False):
-            pytorch_model = PyTorchAIModel()
-            model_path = self.ai_config.get('model_path', '')
-            if pytorch_model.load_model(model_path):
-                self.models['pytorch'] = pytorch_model
-                self.active_models.append('pytorch')
-                self.logger.info("PyTorch AI初始化成功")
-        
-        # 4. TensorFlow模型
-        tf_config = self.ai_config.get('deep_learning', {}).get('tensorflow', {})
-        if tf_config.get('enabled', False):
-            tf_model = TensorFlowAIModel()
-            model_path = self.ai_config.get('model_path', '')
-            if tf_model.load_model(model_path):
-                self.models['tensorflow'] = tf_model
-                self.active_models.append('tensorflow')
-                self.logger.info("TensorFlow AI初始化成功")
+        else:
+            self.logger.info(f"LLM AI未完全启用: enabled={llm_enabled}, has_api_key={bool(llm_config.get('api_key'))}")
         
         self.logger.info(f"已激活的AI模型: {self.active_models}")
     
@@ -714,19 +697,20 @@ class AIModelManager:
         """
         self.config['ai'] = new_config
         self.ai_config = new_config
-        self.enabled = new_config.get('enabled', False)
+        self.enabled = True  # 始终启用
         
-        # 更新 TradingView AI 配置
-        tv_config = new_config.get('tv_analyzer', {})
-        if 'tradingview' in self.models and hasattr(self.models['tradingview'], 'update_config'):
-            self.models['tradingview'].update_config(tv_config)
+        self.logger.info(f"开始更新 AI 模型管理器配置...")
+        self.logger.info(f"输入的配置: {new_config}")
         
-        # 更新 LLM AI 配置
-        llm_config = new_config.get('llm', {})
-        if 'llm' in self.models and hasattr(self.models['llm'], 'update_config'):
-            self.models['llm'].update_config(llm_config)
+        # 清除现有模型并重新初始化
+        self.models = {}
+        self.active_models = []
         
-        self.logger.info(f"AI 模型管理器配置已更新: enabled={self.enabled}")
+        self._initialize_models()
+        
+        self.logger.info(f"AI 模型管理器配置已更新并重新初始化")
+        self.logger.info(f"当前模型: {list(self.models.keys())}")
+        self.logger.info(f"激活的模型: {list(self.active_models)}")
 
 
 class LLMAIAnalyzer(BaseAIModel):
@@ -749,16 +733,22 @@ class LLMAIAnalyzer(BaseAIModel):
             "market_analysis": False,
             "auto_trade": False
         }
+        # 数据库初始化
+        self.db = get_llm_database()
     
     def update_config(self, config: Dict[str, Any]):
         """更新配置"""
         self.enabled = config.get('enabled', False)
-        for key in ["provider", "api_key", "model", "base_url", "timeout", "max_tokens", "temperature"]:
+        for key in ["provider", "api_key", "model", "base_url", "timeout", "temperature"]:
             if key in config:
                 self.config[key] = config[key]
+        # 限制 max_tokens 为合理值
+        if 'max_tokens' in config:
+            max_tokens = int(config['max_tokens'])
+            self.config['max_tokens'] = min(max_tokens, 4096)
         if 'use_for' in config:
             self.use_for.update(config['use_for'])
-        self.logger.info(f"LLM AI配置已更新: enabled={self.enabled}, provider={self.config['provider']}")
+        self.logger.info(f"LLM AI配置已更新: enabled={self.enabled}, provider={self.config['provider']}, max_tokens={self.config['max_tokens']}")
     
     def load_model(self, model_path: str) -> bool:
         """加载配置（LLM不需要文件）"""
@@ -783,6 +773,114 @@ class LLMAIAnalyzer(BaseAIModel):
                 "llm_used": False,
                 "error": str(e)
             }
+    
+    def get_stop_loss_advice(self, features: Dict[str, Any], position_info: Dict[str, Any], conversation_id: Optional[int] = None) -> Dict[str, Any]:
+        """
+        获取动态止损建议
+        
+        Args:
+            features: 市场特征
+            position_info: 持仓信息
+            conversation_id: 对话ID（可选）
+            
+        Returns:
+            止损建议字典
+        """
+        if not self.enabled or not self.config.get('api_key'):
+            return {
+                "advice": "LLM 未配置",
+                "should_close": False,
+                "stop_loss_price": None,
+                "risk_level": "未知",
+                "llm_used": False,
+                "conversation_id": None
+            }
+        
+        try:
+            symbol = position_info.get('symbol', 'XAUUSD')
+            
+            # 获取或创建对话
+            if conversation_id is None:
+                conversation_id = self.db.get_active_conversation(symbol)
+                if conversation_id is None:
+                    conversation_id = self.db.create_conversation(symbol)
+            
+            # 构建提示词，包含历史对话
+            prompt = self._build_prompt(features, for_stop_loss=True, position_info=position_info, conversation_id=conversation_id)
+            
+            # 保存用户输入到数据库
+            user_content = self._format_position_input(position_info, features)
+            self.db.add_message(conversation_id, 'user', user_content)
+            
+            # 调用 LLM
+            analysis = self._call_openai_compatible_api(prompt)
+            
+            # 保存LLM回复到数据库
+            self.db.add_message(conversation_id, 'assistant', analysis)
+            
+            # 提取信息
+            should_close = False
+            stop_loss_price = None
+            reason = ""
+            
+            import re
+            # 提取决策
+            decision_match = re.search(r'决策[：:]\s*(是|否)', analysis)
+            if decision_match:
+                should_close = decision_match.group(1) == "是"
+            
+            # 提取止损价
+            price_match = re.search(r'止损价[：:]\s*(\d+\.?\d*)', analysis)
+            if price_match:
+                stop_loss_price = float(price_match.group(1))
+            
+            # 提取理由
+            reason_match = re.search(r'理由[：:]\s*(.*)', analysis)
+            if reason_match:
+                reason = reason_match.group(1).strip()
+            
+            # 简单的风险等级判断
+            risk_level = "高" if should_close else "中"
+            
+            result = {
+                "advice": analysis,
+                "should_close": should_close,
+                "stop_loss_price": stop_loss_price,
+                "reason": reason,
+                "risk_level": risk_level,
+                "llm_used": True,
+                "provider": self.config['provider'],
+                "conversation_id": conversation_id
+            }
+            
+            # 保存分析结果到数据库
+            self.db.save_position_analysis(conversation_id, position_info, result, False)
+            
+            return result
+        except Exception as e:
+            self.logger.error(f"LLM 动态止损分析失败: {e}")
+            return {
+                "advice": f"LLM 分析失败: {str(e)}",
+                "should_close": False,
+                "stop_loss_price": None,
+                "reason": "",
+                "risk_level": "未知",
+                "llm_used": False,
+                "error": str(e),
+                "conversation_id": None
+            }
+    
+    def _format_position_input(self, position_info: Dict[str, Any], features: Dict[str, Any]) -> str:
+        """格式化持仓信息为提示词输入"""
+        import json
+        simple_features = {
+            "当前价格": features.get('current_close', 0),
+            "RSI": features.get('rsi', 50),
+            "波动率": features.get('volatility_20', 0),
+            "均线状态": "多头" if features.get('ma5_above_ma20', 0) == 1 else "空头",
+            "MACD": "金叉" if features.get('macd_above_signal', 0) == 1 else "死叉"
+        }
+        return f"持仓: {json.dumps(position_info, ensure_ascii=False)}\n市场: {json.dumps(simple_features, ensure_ascii=False)}"
     
     def generate_signal(self, features: Dict[str, Any]) -> Optional[TradingSignal]:
         """
@@ -859,7 +957,7 @@ class LLMAIAnalyzer(BaseAIModel):
             self.logger.error(f"调用 {provider} API 失败: {e}")
             raise
     
-    def _build_prompt(self, features: Dict[str, Any], for_signal: bool) -> str:
+    def _build_prompt(self, features: Dict[str, Any], for_signal: bool = False, for_stop_loss: bool = False, position_info: Dict[str, Any] = None, conversation_id: Optional[int] = None) -> str:
         """构建提示词"""
         # 简化特征，避免过长
         simple_features = {
@@ -871,45 +969,107 @@ class LLMAIAnalyzer(BaseAIModel):
             "MACD": "金叉" if features.get('macd_above_signal', 0) == 1 else "死叉"
         }
         
-        if for_signal:
-            return f"""你是一个专业的黄金交易分析师。请根据以下技术指标分析当前的市场情况，并给出明确的交易建议：
+        # 构建系统提示词
+        system_prompt = """你是一位专业的黄金交易风险管理员，从业15年。
 
-市场数据:
+你的职责是：
+1. 根据当前持仓和市场情况，判断是否需要立即平仓
+2. 如果不需要平仓，给出合理的止损价位
+3. 简洁明了，不要废话
+
+回复格式（严格遵守）：
+决策:是/否
+止损价:价格
+理由:一句话"""
+        
+        # 获取历史对话上下文
+        context = ""
+        if conversation_id is not None:
+            context = self.db.build_context_prompt(conversation_id)
+        
+        if for_stop_loss and position_info:
+            position_str = json.dumps(position_info, ensure_ascii=False, indent=2)
+            user_prompt = f"""持仓信息:
+{position_str}
+
+市场指标:
 {json.dumps(simple_features, ensure_ascii=False, indent=2)}
 
-请给出：
-1. 对当前市场的分析
-2. 明确的交易建议（买入/卖出/观望）
-3. 简单的理由说明
-
-回答格式请简洁明了，不要超过300字。"""
+请根据以上信息给出决策。"""
         else:
-            return f"""请分析以下黄金交易市场的技术指标，并给出你的见解：
-
-市场数据:
+            # 市场分析提示词（保留原功能）
+            user_prompt = f"""市场数据:
 {json.dumps(simple_features, ensure_ascii=False, indent=2)}
 
-请提供：
-1. 对当前价格走势的判断
-2. 市场风险评估
-3. 对交易的建议
-
-回答要求专业、简洁，不超过400字。"""
+请给出分析。"""
+        
+        # 组合完整提示词
+        if context:
+            return f"{system_prompt}\n\n{context}\n\n{user_prompt}"
+        else:
+            return f"{system_prompt}\n\n{user_prompt}"
     
     def _call_openai_compatible_api(self, prompt: str) -> str:
         """调用 OpenAI 兼容的 API"""
         base_url = self.config.get('base_url', '')
+        provider = self.config['provider']
         
         # 根据提供商设置默认的 base_url
         if not base_url:
-            if self.config['provider'] == 'openai':
+            if provider == 'openai':
                 base_url = 'https://api.openai.com/v1'
-            elif self.config['provider'] == 'deepseek':
+            elif provider == 'deepseek':
                 base_url = 'https://api.deepseek.com/v1'
-            elif self.config['provider'] == 'siliconflow':
+            elif provider == 'siliconflow':
                 base_url = 'https://api.siliconflow.cn/v1'
-            elif self.config['provider'] == 'tongyi':
+            elif provider == 'tongyi':
                 base_url = 'https://dashscope.aliyuncs.com/compatible-mode/v1'
+        
+        self.logger.info(f"LLM API 配置: 提供商={provider}, Base URL={base_url}, 模型={self.config['model']}")
+        
+        # 限制 max_tokens 为合理值，避免超出 API 拒绝请求
+        max_tokens = self.config.get('max_tokens', 1000)
+        max_tokens = min(max_tokens, 4096)
+        
+        # 尝试使用 OpenAI SDK（如果可用）
+        if OPENAI_SDK_AVAILABLE:
+            try:
+                self.logger.info(f"使用 OpenAI SDK 调用 API")
+                
+                # 创建 OpenAI 客户端
+                client = OpenAI(
+                    api_key=self.config['api_key'],
+                    base_url=base_url
+                )
+                
+                # 构建调用参数
+                api_params = {
+                    "model": self.config['model'],
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": self.config.get('temperature', 0.7),
+                    "max_tokens": max_tokens,
+                    "timeout": self.config.get('timeout', 30),
+                    "stream": False
+                }
+                
+                # DeepSeek 特定参数
+                if provider == 'deepseek':
+                    api_params["reasoning_effort"] = "high"
+                    api_params["extra_body"] = {"thinking": {"type": "enabled"}}
+                
+                # 发送请求
+                response = client.chat.completions.create(**api_params)
+                
+                content = response.choices[0].message.content
+                self.logger.info("API 调用成功")
+                return content
+            except Exception as e:
+                self.logger.error(f"OpenAI SDK 调用失败: {e}")
+                self.logger.info("回退到 requests 方式")
+                # SDK 失败，回退到原来的 requests 方式
+        
+        # 回退到 requests 方式
+        self.logger.info(f"使用 requests 方式调用 API")
         
         headers = {
             'Content-Type': 'application/json',
@@ -918,29 +1078,39 @@ class LLMAIAnalyzer(BaseAIModel):
         
         data = {
             'model': self.config['model'],
-            'messages': [
-                {'role': 'system', 'content': '你是一个专业的黄金交易分析师。'},
-                {'role': 'user', 'content': prompt}
-            ],
+            'messages': [{'role': 'user', 'content': prompt}],
             'temperature': self.config.get('temperature', 0.7),
-            'max_tokens': self.config.get('max_tokens', 1000),
-            'timeout': self.config.get('timeout', 30)
+            'max_tokens': max_tokens
         }
         
-        self.logger.info(f"调用 {self.config['provider']} API: {base_url}")
+        # DeepSeek 特定参数
+        if provider == 'deepseek':
+            data["reasoning_effort"] = "high"
+            data["thinking"] = {"type": "enabled"}
         
-        response = requests.post(
-            f'{base_url}/chat/completions',
-            headers=headers,
-            json=data,
-            timeout=self.config.get('timeout', 30)
-        )
+        self.logger.info(f"发送 API 请求到: {base_url}/chat/completions, max_tokens={max_tokens}")
         
-        if response.status_code == 200:
-            result = response.json()
-            return result['choices'][0]['message']['content']
-        else:
-            raise Exception(f"API 请求失败: {response.status_code} - {response.text}")
+        try:
+            response = requests.post(
+                f'{base_url}/chat/completions',
+                headers=headers,
+                json=data,
+                timeout=self.config.get('timeout', 30)
+            )
+            
+            self.logger.info(f"API 响应状态码: {response.status_code}")
+            
+            if response.status_code == 200:
+                result = response.json()
+                return result['choices'][0]['message']['content']
+            else:
+                self.logger.error(f"API 请求失败: {response.status_code} - {response.text}")
+                raise Exception(f"API 请求失败: {response.status_code} - {response.text}")
+        except Exception as e:
+            self.logger.error(f"调用 API 时发生异常: {e}")
+            import traceback
+            self.logger.error(f"异常堆栈: {traceback.format_exc()}")
+            raise
     
     def _call_anthropic_api(self, prompt: str) -> str:
         """调用 Anthropic API"""

@@ -125,13 +125,8 @@ class TradingWebSocket {
             this.updatePrice(data.price);
         }
         
-        // 更新K线和指标数据（WebSocket推送）
         if (data.kline && data.indicators) {
             this.updateAllCharts(data.kline, data.indicators);
-            // 同时更新OHLC显示（取最后一根K线）
-            if (data.kline.length > 0) {
-                this.updateOHLC(data.kline[data.kline.length - 1]);
-            }
         }
         
         // 更新持仓数量
@@ -296,6 +291,13 @@ class TradingWebSocket {
                         this.loadCandlesForChart();
                     }, 100);
                 }
+                
+                if (page === 'llm-history') {
+                    // 初始化历史记录页面
+                    setTimeout(() => {
+                        initLLMHistoryPage();
+                    }, 100);
+                }
             })
             .catch(error => {
                 console.error('加载页面失败:', error);
@@ -306,11 +308,8 @@ class TradingWebSocket {
     initKlineChart() {
         const mainChartDom = document.getElementById('kline-chart');
         const volumeChartDom = document.getElementById('volume-chart');
-        const macdChartDom = document.getElementById('macd-chart');
-        const rsiChartDom = document.getElementById('rsi-chart');
-        const kdjChartDom = document.getElementById('kdj-chart');
         
-        if (!mainChartDom || !volumeChartDom || !macdChartDom || !rsiChartDom || !kdjChartDom) return;
+        if (!mainChartDom || !volumeChartDom) return;
         
         // 清理旧图表
         this.cleanupCharts();
@@ -383,96 +382,12 @@ class TradingWebSocket {
                 lineWidth: 1,
             });
             
-            // ========== MACD图 ==========
-            this.macdChart = LightweightCharts.createChart(macdChartDom, {
-                ...chartConfig,
-                timeScale: { ...chartConfig.timeScale, timeVisible: false },
-            });
-            
-            this.macdLineSeries = this.macdChart.addLineSeries({
-                color: '#14b8a6',
-                lineWidth: 1,
-            });
-            
-            this.macdSignalSeries = this.macdChart.addLineSeries({
-                color: '#f87171',
-                lineWidth: 1,
-            });
-            
-            this.macdHistSeries = this.macdChart.addHistogramSeries({
-                priceScaleId: '',
-                scaleMargins: { top: 0.5, bottom: 0.5 },
-            });
-            
-            // ========== RSI图 ==========
-            this.rsiChart = LightweightCharts.createChart(rsiChartDom, {
-                ...chartConfig,
-                timeScale: { ...chartConfig.timeScale, timeVisible: false },
-            });
-            
-            this.rsiSeries = this.rsiChart.addLineSeries({
-                color: '#FF6B6B',
-                lineWidth: 1,
-            });
-            
-            // RSI超买超卖线
-            this.rsiOverbought = this.rsiChart.addLineSeries({
-                color: '#444',
-                lineWidth: 1,
-                lineStyle: 2,
-            });
-            
-            this.rsiOversold = this.rsiChart.addLineSeries({
-                color: '#444',
-                lineWidth: 1,
-                lineStyle: 2,
-            });
-            
-            // ========== KDJ图 ==========
-            this.kdjChart = LightweightCharts.createChart(kdjChartDom, {
-                ...chartConfig,
-                timeScale: { ...chartConfig.timeScale, timeVisible: false },
-            });
-            
-            this.kSeries = this.kdjChart.addLineSeries({
-                color: '#FFD700',
-                lineWidth: 1,
-            });
-            
-            this.dSeries = this.kdjChart.addLineSeries({
-                color: '#14b8a6',
-                lineWidth: 1,
-            });
-            
-            this.jSeries = this.kdjChart.addLineSeries({
-                color: '#f87171',
-                lineWidth: 1,
-            });
-            
             // 响应式调整
             const resizeHandler = () => {
                 if (this.mainChart) {
                     this.mainChart.applyOptions({
                         width: mainChartDom.clientWidth,
                         height: mainChartDom.clientHeight
-                    });
-                }
-                if (this.macdChart) {
-                    this.macdChart.applyOptions({
-                        width: macdChartDom.clientWidth,
-                        height: macdChartDom.clientHeight
-                    });
-                }
-                if (this.rsiChart) {
-                    this.rsiChart.applyOptions({
-                        width: rsiChartDom.clientWidth,
-                        height: rsiChartDom.clientHeight
-                    });
-                }
-                if (this.kdjChart) {
-                    this.kdjChart.applyOptions({
-                        width: kdjChartDom.clientWidth,
-                        height: kdjChartDom.clientHeight
                     });
                 }
             };
@@ -493,8 +408,7 @@ class TradingWebSocket {
             };
             
             // 主图和成交量图双向同步
-            syncTimeScale(this.mainChart, [this.volumeChart, this.macdChart, this.rsiChart, this.kdjChart]);
-            syncTimeScale(this.volumeChart, [this.mainChart]);
+            syncTimeScale(this.mainChart, [this.volumeChart]);
             
             // 监听十字线移动显示K线详细信息
             this.mainChart.subscribeCrosshairMove((param) => {
@@ -585,74 +499,13 @@ class TradingWebSocket {
             this.volumeSeries.setData(volumeData);
         }
         
-        // ========== 更新MACD图 ==========
-        if (this.macdChart) {
-            const macdData = indicators.macd.macd.map((val, i) => ({
-                time: times[i],
-                value: val
-            })).filter(d => d.value !== null);
-            
-            const signalData = indicators.macd.signal.map((val, i) => ({
-                time: times[i],
-                value: val
-            })).filter(d => d.value !== null);
-            
-            const histData = indicators.macd.histogram.map((val, i) => ({
-                time: times[i],
-                value: val,
-                color: val >= 0 ? '#14b8a6' : '#f87171'
-            })).filter(d => d.value !== null);
-            
-            this.macdLineSeries.setData(macdData);
-            this.macdSignalSeries.setData(signalData);
-            this.macdHistSeries.setData(histData);
-        }
-        
-        // ========== 更新RSI图 ==========
-        if (this.rsiChart) {
-            const rsiData = indicators.rsi.map((val, i) => ({
-                time: times[i],
-                value: val
-            })).filter(d => d.value !== null);
-            
-            // 超买超卖线
-            const overboughtLine = times.map(t => ({ time: t, value: 70 }));
-            const oversoldLine = times.map(t => ({ time: t, value: 30 }));
-            
-            this.rsiSeries.setData(rsiData);
-            this.rsiOverbought.setData(overboughtLine);
-            this.rsiOversold.setData(oversoldLine);
-        }
-        
-        // ========== 更新KDJ图 ==========
-        if (this.kdjChart) {
-            const kData = indicators.kdj.k.map((val, i) => ({
-                time: times[i],
-                value: val
-            })).filter(d => d.value !== null);
-            
-            const dData = indicators.kdj.d.map((val, i) => ({
-                time: times[i],
-                value: val
-            })).filter(d => d.value !== null);
-            
-            const jData = indicators.kdj.j.map((val, i) => ({
-                time: times[i],
-                value: val
-            })).filter(d => d.value !== null);
-            
-            this.kSeries.setData(kData);
-            this.dSeries.setData(dData);
-            this.jSeries.setData(jData);
-        }
-        
         // ========== 更新图表时间轴 ==========
         setTimeout(() => {
             // 让主图适应内容
             this.mainChart.timeScale().fitContent();
             
-            // 让其他图表也适应内容并同步范围
-            const otherCharts = [this.volumeChart, this.macdChart, this.rsiChart, this.kdjChart];
+            // 让成交量图也适应内容并同步范围
+            const otherCharts = [this.volumeChart];
             
             // 延迟一下再获取可见范围，确保数据已加载
             setTimeout(() => {
@@ -1227,111 +1080,273 @@ let lastAIAnalysis = null;
 let aiRefreshInterval = null;
 
 async function refreshAIAnalysis() {
-    const signalIndicator = document.getElementById('ai-signal-indicator');
-    const signalText = document.getElementById('ai-signal-text');
-    const signalConfidence = document.getElementById('ai-signal-confidence');
-    const recLot = document.getElementById('ai-rec-lot');
-    const recSl = document.getElementById('ai-rec-sl');
-    const recTp = document.getElementById('ai-rec-tp');
-    const marketRegime = document.getElementById('ai-market-regime');
-    const aiReason = document.getElementById('ai-reason');
-    const buyBtn = document.getElementById('ai-buy-btn');
-    const sellBtn = document.getElementById('ai-sell-btn');
-    
-    if (!signalIndicator) return; // 元素可能不存在
-    
-    try {
-        // 显示加载状态
-        signalIndicator.className = 'display-4 text-warning';
-        signalIndicator.innerHTML = '<i class="fas fa-circle-notch fa-spin"></i>';
-        signalText.textContent = '分析中...';
-        
-        const response = await fetch('/api/ai/analysis');
-        const result = await response.json();
-        
-        lastAIAnalysis = result;
-        
-        if (!result.enabled) {
-            // AI未启用
-            signalIndicator.className = 'display-4 text-secondary';
-            signalIndicator.innerHTML = '<i class="fas fa-circle"></i>';
-            signalText.textContent = 'AI未启用';
-            signalConfidence.textContent = '置信度: --';
-            recLot.textContent = '--';
-            recSl.textContent = '--';
-            recTp.textContent = '--';
-            marketRegime.textContent = '--';
-            aiReason.textContent = result.error || 'AI功能未启用';
-            buyBtn.disabled = true;
-            sellBtn.disabled = true;
-            return;
-        }
-        
-        if (result.error) {
-            signalIndicator.className = 'display-4 text-danger';
-            signalIndicator.innerHTML = '<i class="fas fa-exclamation-triangle"></i>';
-            signalText.textContent = '分析失败';
-            aiReason.textContent = result.error;
-            return;
-        }
-        
-        // 更新信号显示
-        const signal = result.combined_signal;
-        const riskParams = result.risk_params;
-        
-        if (signal) {
-            // 更新信号指示器
-            updateSignalIndicator(signal, signalIndicator, signalText, signalConfidence);
-            
-            // 更新按钮状态
-            updateTradeButtons(signal, buyBtn, sellBtn, riskParams);
-        }
-        
-        // 更新推荐参数
-        if (riskParams) {
-            recLot.textContent = riskParams.lot ? riskParams.lot.toFixed(2) : '--';
-            recSl.textContent = riskParams.sl_points || '--';
-            recTp.textContent = riskParams.tp_points || '--';
-            marketRegime.textContent = getRegimeText(riskParams.regime);
-        }
-        
-        // 更新原因
-        aiReason.textContent = signal?.reason || '暂无分析';
-        
-    } catch (error) {
-        console.error('AI分析刷新失败:', error);
-        signalIndicator.className = 'display-4 text-danger';
-        signalIndicator.innerHTML = '<i class="fas fa-exclamation-circle"></i>';
-        signalText.textContent = '分析失败';
-        aiReason.textContent = '网络错误';
-    }
-    
-    // 更新 LLM 分析
+    // 更新 LLM 深度分析
     const llmStatus = document.getElementById('llm-status');
     const llmResult = document.getElementById('llm-result');
     const llmLoading = document.getElementById('llm-loading');
     
-    if (llmStatus && llmResult && lastAIAnalysis) {
-        if (lastAIAnalysis.llm_enabled) {
-            llmStatus.className = 'badge bg-success text-white small';
-            llmStatus.textContent = '已启用';
+    if (!llmStatus || !llmResult) return;
+    
+    try {
+        // 显示加载状态
+        llmLoading.style.display = 'block';
+        llmResult.style.display = 'none';
+        
+        // 添加前端超时控制（35秒，比后端超时稍长一点）
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 35000);
+        
+        try {
+            const response = await fetch('/api/ai/analysis', {
+                signal: controller.signal
+            });
             
-            if (lastAIAnalysis.llm_analysis) {
+            clearTimeout(timeoutId);
+            const result = await response.json();
+            
+            lastAIAnalysis = result;
+            
+            if (!result.enabled) {
+                llmStatus.className = 'badge bg-secondary text-white small';
+                llmStatus.textContent = '未启用';
                 llmLoading.style.display = 'none';
                 llmResult.style.display = 'block';
-                llmResult.innerHTML = `<div class="llm-analysis-content">${lastAIAnalysis.llm_analysis.replace(/\n/g, '<br>')}</div>`;
-            } else {
-                llmLoading.style.display = 'none';
-                llmResult.style.display = 'block';
-                llmResult.innerHTML = '<p class="text-muted text-center">暂无 LLM 分析</p>';
+                llmResult.innerHTML = '<p class="text-muted text-center">' + (result.error || 'AI功能未启用') + '</p>';
+                return;
             }
-        } else {
-            llmStatus.className = 'badge bg-secondary text-white small';
-            llmStatus.textContent = '未配置';
-            llmLoading.style.display = 'none';
-            llmResult.style.display = 'block';
-            llmResult.innerHTML = '<p class="text-muted text-center">请先在系统设置中配置 LLM</p>';
+            
+            if (result.error) {
+                llmStatus.className = 'badge bg-warning text-white small';
+                llmStatus.textContent = '警告';
+                llmLoading.style.display = 'none';
+                llmResult.style.display = 'block';
+                llmResult.innerHTML = `<p class="text-warning text-center">${result.llm_analysis || result.error}</p>`;
+                return;
+            }
+            
+            if (result.llm_enabled) {
+                llmStatus.className = 'badge bg-success text-white small';
+                llmStatus.textContent = '已启用';
+                
+                if (result.llm_analysis) {
+                    llmLoading.style.display = 'none';
+                    llmResult.style.display = 'block';
+                    llmResult.innerHTML = `<div class="llm-analysis-content">${result.llm_analysis.replace(/\n/g, '<br>')}</div>`;
+                } else {
+                    llmLoading.style.display = 'none';
+                    llmResult.style.display = 'block';
+                    llmResult.innerHTML = '<p class="text-muted text-center">暂无 LLM 深度分析</p>';
+                }
+            } else {
+                llmStatus.className = 'badge bg-secondary text-white small';
+                llmStatus.textContent = '未配置';
+                llmLoading.style.display = 'none';
+                llmResult.style.display = 'block';
+                llmResult.innerHTML = '<p class="text-muted text-center">请先在系统设置中配置 LLM</p>';
+            }
+            
+        } catch (fetchError) {
+            clearTimeout(timeoutId);
+            if (fetchError.name === 'AbortError') {
+                console.error('LLM分析请求超时');
+                llmStatus.className = 'badge bg-warning text-white small';
+                llmStatus.textContent = '超时';
+                llmLoading.style.display = 'none';
+                llmResult.style.display = 'block';
+                llmResult.innerHTML = '<p class="text-warning text-center">⚠️ 请求超时，请稍后重试或检查网络连接</p>';
+            } else {
+                throw fetchError;
+            }
         }
+        
+    } catch (error) {
+        console.error('LLM分析刷新失败:', error);
+        llmStatus.className = 'badge bg-danger text-white small';
+        llmStatus.textContent = '错误';
+        llmLoading.style.display = 'none';
+        llmResult.style.display = 'block';
+        llmResult.innerHTML = '<p class="text-danger text-center">网络错误</p>';
+    }
+}
+
+async function refreshStopLossAdvice(autoExecute = false) {
+    // 更新动态止损建议
+    const stopLossResult = document.getElementById('stop-loss-result');
+    const stopLossLoading = document.getElementById('stop-loss-loading');
+    
+    if (!stopLossResult) return;
+    
+    try {
+        // 显示加载状态
+        stopLossLoading.style.display = 'block';
+        stopLossResult.style.display = 'none';
+        
+        // 添加前端超时控制（35秒，缩短超时）
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 35000);
+        
+        try {
+            const url = `/api/ai/stop-loss?auto_execute=${autoExecute}`;
+            const response = await fetch(url, {
+                signal: controller.signal
+            });
+            
+            clearTimeout(timeoutId);
+            const result = await response.json();
+            
+            if (!result.success) {
+                stopLossLoading.style.display = 'none';
+                stopLossResult.style.display = 'block';
+                stopLossResult.innerHTML = `<p class="text-warning text-center">${result.message}</p>`;
+                return;
+            }
+            
+            const data = result.data;
+            
+            // 显示自动平仓结果
+            let closedHtml = '';
+            if (data.closed_positions && data.closed_positions.length > 0) {
+                closedHtml = `
+                    <div class="alert alert-success mb-3">
+                        <h6><i class="fas fa-check-circle"></i> 已自动平仓</h6>
+                        <ul class="mb-0">
+                            ${data.closed_positions.map(p => `<li>订单 ${p.ticket}: ${p.reason}</li>`).join('')}
+                        </ul>
+                    </div>
+                `;
+                // 刷新持仓列表
+                refreshPositions();
+            }
+            
+            if (!data.has_position) {
+                stopLossLoading.style.display = 'none';
+                stopLossResult.style.display = 'block';
+                stopLossResult.innerHTML = closedHtml + `<p class="text-muted text-center">${data.advice}</p>`;
+                return;
+            }
+            
+            // 渲染止损建议
+            let html = closedHtml;
+            if (data.stop_loss_advice && data.stop_loss_advice.length > 0) {
+                for (const advice of data.stop_loss_advice) {
+                    const pos = advice.position_info;
+                    const riskColor = {
+                        '低': 'text-success',
+                        '中': 'text-warning',
+                        '高': 'text-danger',
+                        '未知': 'text-secondary'
+                    }[advice.risk_level] || 'text-secondary';
+                    
+                    const borderColor = advice.should_close ? 'border-danger' : 
+                                      advice.risk_level === '高' ? 'border-danger' : 
+                                      advice.risk_level === '中' ? 'border-warning' : 'border-success';
+                    
+                    html += `
+                        <div class="card mb-2 ${borderColor}">
+                            <div class="card-body py-2">
+                                <div class="row align-items-center">
+                                    <div class="col-md-2">
+                                        <span class="badge ${pos.type === 'BUY' ? 'bg-success' : 'bg-danger'}">${pos.type}</span>
+                                        <span class="ms-2">${pos.volume} 手</span>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <small class="text-muted">利润:</small> 
+                                        <span class="${pos.profit >= 0 ? 'text-success' : 'text-danger'}">
+                                            ${pos.profit >= 0 ? '+' : ''}${pos.profit.toFixed(2)}
+                                        </span>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <small class="text-muted">决策:</small> 
+                                        <span class="badge ${advice.should_close ? 'bg-danger' : 'bg-success'}">
+                                            ${advice.should_close ? '立即平仓' : '继续持有'}
+                                        </span>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <small class="text-muted">风险:</small> 
+                                        <span class="${riskColor}">${advice.risk_level}</span>
+                                    </div>
+                                    <div class="col-md-4">
+                                        ${advice.should_close ? `
+                                            <button class="btn btn-sm btn-danger" onclick="closePosition(${pos.ticket})">
+                                                <i class="fas fa-times"></i> 立即平仓
+                                            </button>
+                                        ` : advice.stop_loss_price ? `
+                                            <button class="btn btn-sm btn-outline-primary" onclick="applyStopLoss(${pos.ticket}, ${advice.stop_loss_price})">
+                                                <i class="fas fa-shield"></i> 止损: ${advice.stop_loss_price.toFixed(2)}
+                                            </button>
+                                        ` : ''}
+                                    </div>
+                                </div>
+                                ${advice.reason ? `
+                                <div class="mt-2 pt-2 border-top">
+                                    <small class="text-muted">LLM分析:</small>
+                                    <div class="mt-1 text-sm">${advice.reason}</div>
+                                </div>
+                                ` : ''}
+                            </div>
+                        </div>
+                    `;
+                }
+            } else {
+                html += `<p class="text-muted text-center">${data.advice}</p>`;
+            }
+            
+            stopLossLoading.style.display = 'none';
+            stopLossResult.style.display = 'block';
+            stopLossResult.innerHTML = html;
+            
+        } catch (fetchError) {
+            clearTimeout(timeoutId);
+            if (fetchError.name === 'AbortError') {
+                console.error('动态止损请求超时');
+                stopLossLoading.style.display = 'none';
+                stopLossResult.style.display = 'block';
+                stopLossResult.innerHTML = '<p class="text-warning text-center">⚠️ 请求超时，请稍后重试</p>';
+            } else {
+                throw fetchError;
+            }
+        }
+        
+    } catch (error) {
+        console.error('动态止损刷新失败:', error);
+        stopLossLoading.style.display = 'none';
+        stopLossResult.style.display = 'block';
+        stopLossResult.innerHTML = '<p class="text-danger text-center">网络错误</p>';
+    }
+}
+
+async function applyStopLoss(ticket, newSlPrice) {
+    // 应用止损
+    if (!confirm(`确定要将订单 ${ticket} 的止损更新为 ${newSlPrice.toFixed(2)} 吗？`)) {
+        return;
+    }
+    
+    try {
+        showToast('正在更新止损...', 'info');
+        
+        const response = await fetch('/api/position/modify', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                ticket: ticket,
+                sl: newSlPrice
+            })
+        });
+        
+        const result = await response.json();
+        
+        if (result.success) {
+            showToast('止损更新成功', 'success');
+            // 刷新持仓和止损建议
+            refreshPositions();
+            refreshStopLossAdvice();
+        } else {
+            showToast(result.message || '止损更新失败', 'error');
+        }
+        
+    } catch (error) {
+        console.error('更新止损失败:', error);
+        showToast('更新止损失败', 'error');
     }
 }
 
@@ -1439,6 +1454,224 @@ function startAIRefresh() {
     aiRefreshInterval = setInterval(() => {
         refreshAIAnalysis();
     }, 30000);
+}
+
+// ========== LLM历史记录功能 ==========
+
+let currentHistoryTab = 'analysis';
+
+function initLLMHistoryPage() {
+    // 初始化标签页切换
+    const tabs = document.querySelectorAll('#history-tabs .nav-link');
+    tabs.forEach(tab => {
+        tab.addEventListener('click', (e) => {
+            e.preventDefault();
+            const newTab = tab.getAttribute('data-tab');
+            if (newTab !== currentHistoryTab) {
+                switchHistoryTab(newTab);
+            }
+        });
+    });
+    
+    // 初始化筛选器
+    const filterSymbol = document.getElementById('history-filter-symbol');
+    const filterLimit = document.getElementById('history-filter-limit');
+    if (filterSymbol) {
+        filterSymbol.addEventListener('change', refreshLLMHistory);
+    }
+    if (filterLimit) {
+        filterLimit.addEventListener('change', refreshLLMHistory);
+    }
+    
+    // 初始加载
+    refreshLLMHistory();
+}
+
+function switchHistoryTab(tab) {
+    currentHistoryTab = tab;
+    
+    // 更新标签样式
+    const tabs = document.querySelectorAll('#history-tabs .nav-link');
+    tabs.forEach(t => {
+        t.classList.toggle('active', t.getAttribute('data-tab') === tab);
+    });
+    
+    // 刷新数据
+    refreshLLMHistory();
+}
+
+async function refreshLLMHistory() {
+    const loadingEl = document.getElementById('history-loading');
+    const dataEl = document.getElementById('history-data');
+    
+    if (!loadingEl || !dataEl) return;
+    
+    loadingEl.style.display = 'block';
+    dataEl.innerHTML = '';
+    
+    try {
+        const symbol = document.getElementById('history-filter-symbol')?.value || '';
+        const limit = parseInt(document.getElementById('history-filter-limit')?.value || '50');
+        
+        if (currentHistoryTab === 'analysis') {
+            await loadAnalysisHistory(symbol, limit);
+        } else {
+            await loadConversationHistory(symbol, limit);
+        }
+        
+        loadingEl.style.display = 'none';
+    } catch (error) {
+        console.error('加载历史记录失败:', error);
+        loadingEl.style.display = 'none';
+        dataEl.innerHTML = '<p class="text-danger text-center">加载失败</p>';
+    }
+}
+
+async function loadAnalysisHistory(symbol, limit) {
+    const dataEl = document.getElementById('history-data');
+    if (!dataEl) return;
+    
+    let url = `/api/llm/history/analysis?limit=${limit}`;
+    if (symbol) {
+        url += `&symbol=${symbol}`;
+    }
+    
+    const response = await fetch(url);
+    const result = await response.json();
+    
+    if (!result.success) {
+        dataEl.innerHTML = `<p class="text-danger text-center">${result.message}</p>`;
+        return;
+    }
+    
+    const analyses = result.data || [];
+    if (analyses.length === 0) {
+        dataEl.innerHTML = '<p class="text-muted text-center">暂无历史记录</p>';
+        return;
+    }
+    
+    let html = '<div class="table-responsive"><table class="table table-striped table-hover">';
+    html += '<thead class="table-dark"><tr>';
+    html += '<th>时间</th><th>订单</th><th>品种</th><th>方向</th><th>手数</th>';
+    html += '<th>开仓价</th><th>现价</th><th>利润</th><th>决策</th><th>止损价</th><th>原因</th>';
+    html += '</tr></thead><tbody>';
+    
+    for (const analysis of analyses) {
+        const profitClass = analysis.profit >= 0 ? 'text-success' : 'text-danger';
+        const decisionBadge = analysis.decision === 'close' ? 'bg-danger' : 'bg-success';
+        const decisionText = analysis.decision === 'close' ? '平仓' : '持有';
+        
+        html += '<tr>';
+        html += `<td>${new Date(analysis.timestamp).toLocaleString('zh-CN')}</td>`;
+        html += `<td>${analysis.ticket || '-'}</td>`;
+        html += `<td>${analysis.symbol}</td>`;
+        html += `<td><span class="badge ${analysis.position_type === 'BUY' ? 'bg-success' : 'bg-danger'}">${analysis.position_type}</span></td>`;
+        html += `<td>${analysis.volume}</td>`;
+        html += `<td>${analysis.open_price?.toFixed(2) || '-'}</td>`;
+        html += `<td>${analysis.current_price?.toFixed(2) || '-'}</td>`;
+        html += `<td class="${profitClass}">${analysis.profit >= 0 ? '+' : ''}${analysis.profit?.toFixed(2) || '-'}</td>`;
+        html += `<td><span class="badge ${decisionBadge}">${decisionText}</span></td>`;
+        html += `<td>${analysis.stop_loss_price?.toFixed(2) || '-'}</td>`;
+        html += `<td class="text-truncate" style="max-width: 200px;" title="${analysis.reason || ''}">${analysis.reason || '-'}</td>`;
+        html += '</tr>';
+    }
+    
+    html += '</tbody></table></div>';
+    dataEl.innerHTML = html;
+}
+
+async function loadConversationHistory(symbol, limit) {
+    const dataEl = document.getElementById('history-data');
+    if (!dataEl) return;
+    
+    let url = `/api/llm/history/conversations?limit=${limit}`;
+    if (symbol) {
+        url += `&symbol=${symbol}`;
+    }
+    
+    const response = await fetch(url);
+    const result = await response.json();
+    
+    if (!result.success) {
+        dataEl.innerHTML = `<p class="text-danger text-center">${result.message}</p>`;
+        return;
+    }
+    
+    const conversations = result.data || [];
+    if (conversations.length === 0) {
+        dataEl.innerHTML = '<p class="text-muted text-center">暂无对话记录</p>';
+        return;
+    }
+    
+    let html = '<div class="list-group">';
+    for (const conv of conversations) {
+        const statusBadge = conv.status === 'active' ? 'bg-success' : 'bg-secondary';
+        html += `
+            <a href="#" class="list-group-item list-group-item-action" onclick="showConversationDetail(${conv.id}); return false;">
+                <div class="d-flex w-100 justify-content-between align-items-center">
+                    <div>
+                        <h6 class="mb-1">对话 #${conv.id} - ${conv.symbol}</h6>
+                        <small class="text-muted">开始时间: ${new Date(conv.start_time).toLocaleString('zh-CN')}</small>
+                    </div>
+                    <span class="badge ${statusBadge}">${conv.status === 'active' ? '活跃' : '结束'}</span>
+                </div>
+            </a>
+        `;
+    }
+    html += '</div>';
+    
+    dataEl.innerHTML = html;
+}
+
+async function showConversationDetail(conversationId) {
+    const modal = new bootstrap.Modal(document.getElementById('conversationModal'));
+    const modalContent = document.getElementById('modal-conversation-content');
+    const modalTitle = document.getElementById('modal-conversation-id');
+    
+    modalTitle.textContent = `#${conversationId}`;
+    modalContent.innerHTML = '<p class="text-center"><i class="fas fa-spinner fa-spin"></i> 加载中...</p>';
+    modal.show();
+    
+    try {
+        const response = await fetch(`/api/llm/conversation/${conversationId}`);
+        const result = await response.json();
+        
+        if (!result.success) {
+            modalContent.innerHTML = `<p class="text-danger text-center">${result.message}</p>`;
+            return;
+        }
+        
+        const messages = result.data || [];
+        if (messages.length === 0) {
+            modalContent.innerHTML = '<p class="text-muted text-center">暂无对话内容</p>';
+            return;
+        }
+        
+        let html = '';
+        for (const msg of messages) {
+            const isAssistant = msg.role === 'assistant';
+            const bgClass = isAssistant ? 'bg-primary' : 'bg-secondary';
+            const alignClass = isAssistant ? 'text-end' : 'text-start';
+            const roleLabel = isAssistant ? 'AI助手' : '用户';
+            
+            html += `
+                <div class="mb-3 ${alignClass}">
+                    <div class="badge ${bgClass} mb-1">${roleLabel}</div>
+                    <div class="card">
+                        <div class="card-body py-2">
+                            <p class="mb-0 small">${msg.content.replace(/\n/g, '<br>')}</p>
+                        </div>
+                    </div>
+                    <small class="text-muted">${new Date(msg.timestamp).toLocaleString('zh-CN')}</small>
+                </div>
+            `;
+        }
+        
+        modalContent.innerHTML = html;
+    } catch (error) {
+        console.error('加载对话详情失败:', error);
+        modalContent.innerHTML = '<p class="text-danger text-center">加载失败</p>';
+    }
 }
 
 // 页面加载后启动AI刷新

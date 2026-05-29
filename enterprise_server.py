@@ -8,6 +8,8 @@ import json
 import threading
 from datetime import datetime
 from typing import Dict, Set, Any
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
+from functools import partial
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -74,6 +76,9 @@ class EnterpriseWebServer:
         
         # WebSocket连接管理器
         self.connection_manager = ConnectionManager()
+        
+        # 创建线程池用于执行同步任务
+        self.executor = ThreadPoolExecutor(max_workers=4)
         
         # 创建FastAPI应用
         self.app = FastAPI(title="黄金量化交易系统 - 企业版", version="3.0.0")
@@ -398,8 +403,67 @@ class EnterpriseWebServer:
                 "count": len(orders)
             }
         
-        # ========== AI功能API ==========
+        # ========== LLM 历史记录 API ==========
         
+        @self.app.get("/api/llm/history/analysis")
+        async def get_llm_analysis_history(symbol: Optional[str] = None, limit: int = 50):
+            """获取 LLM 持仓分析历史记录"""
+            try:
+                from llm_database import get_llm_database
+                db = get_llm_database()
+                analysis_list = db.get_all_position_analysis(symbol, limit)
+                return {
+                    "success": True,
+                    "data": analysis_list,
+                    "count": len(analysis_list)
+                }
+            except Exception as e:
+                self.logger.error(f"获取 LLM 分析历史失败: {e}")
+                return {
+                    "success": False,
+                    "message": str(e)
+                }
+        
+        @self.app.get("/api/llm/history/conversations")
+        async def get_llm_conversations(symbol: Optional[str] = None, limit: int = 50):
+            """获取 LLM 对话历史记录"""
+            try:
+                from llm_database import get_llm_database
+                db = get_llm_database()
+                conversations = db.get_all_conversations(symbol, limit)
+                return {
+                    "success": True,
+                    "data": conversations,
+                    "count": len(conversations)
+                }
+            except Exception as e:
+                self.logger.error(f"获取 LLM 对话历史失败: {e}")
+                return {
+                    "success": False,
+                    "message": str(e)
+                }
+        
+        @self.app.get("/api/llm/conversation/{conversation_id}")
+        async def get_conversation_detail(conversation_id: int):
+            """获取特定对话的详细内容"""
+            try:
+                from llm_database import get_llm_database
+                db = get_llm_database()
+                messages = db.get_conversation_history(conversation_id, limit=100)
+                return {
+                    "success": True,
+                    "conversation_id": conversation_id,
+                    "data": messages
+                }
+            except Exception as e:
+                self.logger.error(f"获取对话详情失败: {e}")
+                return {
+                    "success": False,
+                    "message": str(e)
+                }
+
+        # ========== AI功能API ==========
+
         def safe_json_serialize(obj):
             """安全地将对象转换为JSON可序列化格式"""
             import numpy as np
@@ -408,6 +472,8 @@ class EnterpriseWebServer:
                 return {key: safe_json_serialize(value) for key, value in obj.items()}
             elif isinstance(obj, list):
                 return [safe_json_serialize(item) for item in obj]
+            elif isinstance(obj, bool):
+                return obj  # 明确保留布尔值
             elif isinstance(obj, np.integer):
                 return int(obj)
             elif isinstance(obj, np.floating):
@@ -421,19 +487,75 @@ class EnterpriseWebServer:
         # 获取AI分析
         @self.app.get("/api/ai/analysis")
         async def get_ai_analysis(symbol: str = "XAUUSD"):
-            """获取AI分析结果"""
+            """获取AI分析结果（带超时控制）"""
+            if not self.strategy_engine:
+                return {"enabled": False, "error": "策略引擎未初始化"}
+            
             try:
-                if self.strategy_engine:
-                    result = self.strategy_engine.get_ai_analysis(symbol)
-                    # 确保所有类型安全
-                    return safe_json_serialize(result)
-                else:
-                    return {"enabled": False, "error": "策略引擎未初始化"}
+                # 在线程池中执行同步任务，避免阻塞事件循环
+                loop = asyncio.get_event_loop()
+                
+                # 设置超时时间为 30 秒
+                task = loop.run_in_executor(
+                    self.executor,
+                    partial(self.strategy_engine.get_ai_analysis, symbol)
+                )
+                
+                # 等待任务完成，超时 30 秒
+                try:
+                    result = await asyncio.wait_for(task, timeout=30.0)
+                except asyncio.TimeoutError:
+                    self.logger.error("AI分析超时")
+                    return {
+                        "enabled": True,
+                        "llm_enabled": False,
+                        "llm_analysis": "⚠️ 分析超时，请稍后重试。建议：检查网络连接或调整API设置。",
+                        "error": "timeout"
+                    }
+                
+                # 确保所有类型安全
+                return safe_json_serialize(result)
+                
             except Exception as e:
                 self.logger.error(f"获取AI分析失败: {e}")
                 import traceback
                 self.logger.error(f"堆栈跟踪: {traceback.format_exc()}")
-                return {"enabled": False, "error": str(e)}
+                return {
+                    "enabled": True,
+                    "llm_enabled": False,
+                    "llm_analysis": f"⚠️ 分析失败：{str(e)}",
+                    "error": str(e)
+                }
+        
+        # 获取动态止损建议
+        @self.app.get("/api/ai/stop-loss")
+        async def get_dynamic_stop_loss(symbol: str = "XAUUSD", auto_execute: bool = False):
+            """获取动态止损建议"""
+            try:
+                if not self.strategy_engine:
+                    return {"success": False, "message": "策略引擎未初始化"}
+                
+                # 在线程池中执行同步任务
+                loop = asyncio.get_event_loop()
+                
+                task = loop.run_in_executor(
+                    self.executor,
+                    partial(self.strategy_engine.get_dynamic_stop_loss, symbol, auto_execute)
+                )
+                
+                # 等待任务完成，超时 30 秒（简化提示词后应该更快）
+                try:
+                    result = await asyncio.wait_for(task, timeout=30.0)
+                    return {"success": True, "data": result}
+                except asyncio.TimeoutError:
+                    self.logger.error("动态止损分析超时")
+                    return {"success": False, "message": "分析超时，请稍后重试"}
+                
+            except Exception as e:
+                self.logger.error(f"获取动态止损失败: {e}")
+                import traceback
+                self.logger.error(f"堆栈跟踪: {traceback.format_exc()}")
+                return {"success": False, "message": str(e)}
         
         # 获取AI信号
         @self.app.get("/api/ai/signal")
@@ -559,6 +681,63 @@ class EnterpriseWebServer:
                 self.logger.error(f"全部平仓失败: {e}")
                 return {"success": False, "message": str(e)}
         
+        # 修改持仓（止损/止盈）
+        @self.app.post("/api/position/modify")
+        async def modify_position(request: Request):
+            try:
+                data = await request.json()
+                ticket = data.get('ticket')
+                sl = data.get('sl')
+                tp = data.get('tp')
+                
+                if not ticket:
+                    return {"success": False, "message": "持仓单号不能为空"}
+                
+                self.logger.info(f"修改持仓 {ticket}: sl={sl}, tp={tp}")
+                
+                # 调用 mt5_interface 修改持仓
+                if self.mt5_interface:
+                    # 先获取持仓信息
+                    positions = self.mt5_interface.get_positions()
+                    target_position = None
+                    for pos in positions:
+                        if pos.ticket == ticket:
+                            target_position = pos
+                            break
+                    
+                    if target_position:
+                        # 使用 modify_position 需要的接口 - 需要查看mt5_interface的实现
+                        # 这里我们使用简单的修改方法
+                        new_sl = sl if sl is not None else target_position.sl
+                        new_tp = tp if tp is not None else target_position.tp
+                        
+                        # 尝试直接修改
+                        import MetaTrader5 as mt5
+                        
+                        request = {
+                            "action": mt5.TRADE_ACTION_SLTP,
+                            "symbol": target_position.symbol,
+                            "position": ticket,
+                            "sl": new_sl,
+                            "tp": new_tp,
+                        }
+                        
+                        result = mt5.order_send(request)
+                        if result and result.retcode == mt5.TRADE_RETCODE_DONE:
+                            await self.broadcast_update()
+                            return {"success": True, "message": "修改成功"}
+                        else:
+                            error_msg = result.comment if result else "未知错误"
+                            self.logger.error(f"修改持仓失败: {error_msg}")
+                            return {"success": False, "message": error_msg}
+                    else:
+                        return {"success": False, "message": "找不到该持仓"}
+                else:
+                    return {"success": False, "message": "MT5接口未初始化"}
+            except Exception as e:
+                self.logger.error(f"修改持仓失败: {e}")
+                return {"success": False, "message": str(e)}
+        
         # Webhook
         @self.app.post("/webhook")
         async def webhook(request: Request):
@@ -671,7 +850,9 @@ class EnterpriseWebServer:
                 if 'llm_timeout' in settings:
                     config['ai']['llm']['timeout'] = settings['llm_timeout']
                 if 'llm_max_tokens' in settings:
-                    config['ai']['llm']['max_tokens'] = settings['llm_max_tokens']
+                    # 限制 max_tokens 为合理值
+                    max_tokens = int(settings['llm_max_tokens'])
+                    config['ai']['llm']['max_tokens'] = min(max_tokens, 4096)
                 if 'llm_temperature' in settings:
                     config['ai']['llm']['temperature'] = settings['llm_temperature']
                 
@@ -713,6 +894,7 @@ class EnterpriseWebServer:
                 "dashboard": self._dashboard_page(),
                 "trade": self._trade_page(),
                 "signals": self._signals_page(),
+                "llm-history": self._llm_history_page(),
                 "settings": self._settings_page()
             }
             return HTMLResponse(content=pages.get(page_name, self._dashboard_page()))
@@ -897,45 +1079,57 @@ class EnterpriseWebServer:
     <link href="/static/css/enterprise.css" rel="stylesheet">
 </head>
 <body>
-    <nav class="navbar navbar-expand-lg navbar-dark bg-dark">
+    <nav class="navbar navbar-expand-lg navbar-dark bg-dark shadow-sm sticky-top">
         <div class="container-fluid">
-            <a class="navbar-brand" href="#">
+            <a class="navbar-brand d-flex align-items-center gap-2" href="#">
                 <i class="fas fa-chart-line"></i>
                 黄金量化交易系统
                 <span class="badge bg-warning text-dark ms-2">ENTERPRISE</span>
             </a>
-            <div class="navbar-nav ms-auto">
-                <span id="connection-status" class="badge bg-danger ms-3">
-                    <i class="fas fa-circle"></i> 连接断开
+            <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#topNavMenu" aria-controls="topNavMenu" aria-expanded="false" aria-label="Toggle navigation">
+                <span class="navbar-toggler-icon"></span>
+            </button>
+            <div class="collapse navbar-collapse" id="topNavMenu">
+                <ul class="navbar-nav me-auto mb-2 mb-lg-0">
+                    <li class="nav-item">
+                        <a href="#" class="nav-link list-group-item list-group-item-action active" data-page="dashboard">
+                            <i class="fas fa-tachometer-alt me-1"></i> 仪表板
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a href="#" class="nav-link list-group-item list-group-item-action" data-page="trade">
+                            <i class="fas fa-exchange-alt me-1"></i> 手动交易
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a href="#" class="nav-link list-group-item list-group-item-action" data-page="signals">
+                            <i class="fas fa-broadcast-tower me-1"></i> 信号测试
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a href="#" class="nav-link list-group-item list-group-item-action" data-page="llm-history">
+                            <i class="fas fa-history me-1"></i> LLM 历史记录
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a href="#" class="nav-link list-group-item list-group-item-action" data-page="settings">
+                            <i class="fas fa-cog me-1"></i> 系统设置
+                        </a>
+                    </li>
+                </ul>
+            </div>
+            <div class="d-flex align-items-center gap-3">
+                <span id="server-time" class="navbar-text text-light"></span>
+                <span id="connection-status" class="badge bg-danger d-flex align-items-center gap-2">
+                    <i class="fas fa-circle"></i>
+                    连接断开
                 </span>
-                <span id="server-time" class="text-light ms-3"></span>
             </div>
         </div>
     </nav>
 
-    <div class="container-fluid mt-4">
-        <div class="row">
-            <div class="col-md-2">
-                <div class="list-group" id="nav-menu">
-                    <a href="#" class="list-group-item list-group-item-action active" data-page="dashboard">
-                        <i class="fas fa-tachometer-alt"></i> 仪表板
-                    </a>
-                    <a href="#" class="list-group-item list-group-item-action" data-page="trade">
-                        <i class="fas fa-exchange-alt"></i> 手动交易
-                    </a>
-                    <a href="#" class="list-group-item list-group-item-action" data-page="signals">
-                        <i class="fas fa-broadcast-tower"></i> 信号测试
-                    </a>
-                    <a href="#" class="list-group-item list-group-item-action" data-page="settings">
-                        <i class="fas fa-cog"></i> 系统设置
-                    </a>
-                </div>
-            </div>
-            
-            <div class="col-md-10">
-                <div id="main-content"></div>
-            </div>
-        </div>
+    <div class="container-fluid dashboard-shell mt-4 px-3 px-lg-4">
+        <div id="main-content"></div>
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
@@ -949,50 +1143,92 @@ class EnterpriseWebServer:
         """仪表板"""
         return """
 <div id="page-dashboard" class="page-content">
-    <h2 class="mb-3"><i class="fas fa-tachometer-alt"></i> 企业级仪表板</h2>
-    
-    <div class="row mb-3">
-        <div class="col-md-3">
-            <div class="card bg-primary text-white" style="height: 100%;">
-                <div class="card-body py-2">
-                    <h6 class="card-subtitle mb-1">账户余额</h6>
-                    <h4 class="card-title" id="account-balance">$0.00</h4>
-                </div>
-            </div>
+    <div class="dashboard-header mb-4 d-flex flex-column flex-lg-row align-items-start justify-content-between gap-3">
+        <div>
+            <h2 class="mb-2"><i class="fas fa-tachometer-alt"></i> 企业级仪表板</h2>
+            <p class="text-muted mb-0">实时监控行情、持仓与交易执行，支持跨屏自适应展示。</p>
         </div>
-        <div class="col-md-3">
-            <div class="card bg-success text-white" style="height: 100%;">
-                <div class="card-body py-2">
-                    <h6 class="card-subtitle mb-1">账户净值</h6>
-                    <h4 class="card-title" id="account-equity">$0.00</h4>
-                </div>
-            </div>
-        </div>
-        <div class="col-md-3">
-            <div class="card bg-warning text-dark" style="height: 100%;">
-                <div class="card-body py-2">
-                    <h6 class="card-subtitle mb-1">浮动盈亏</h6>
-                    <h4 class="card-title" id="account-profit">$0.00</h4>
-                </div>
-            </div>
-        </div>
-        <div class="col-md-3">
-            <div class="card bg-info text-white" style="height: 100%;">
-                <div class="card-body py-2">
-                    <h6 class="card-subtitle mb-1">持仓数量</h6>
-                    <h4 class="card-title" id="positions-count">0</h4>
-                </div>
-            </div>
+        <div class="d-flex flex-wrap gap-2 align-items-center">
+            <span class="badge badge-pill badge-secondary px-3 py-2">最新数据</span>
+            <span class="badge badge-pill badge-secondary px-3 py-2">K线周期: <strong>1小时</strong></span>
         </div>
     </div>
-    
-    <div class="row mb-3">
-        <div class="col-md-12">
-            <div class="card">
-                <div class="card-header bg-dark text-white py-2 d-flex justify-content-between align-items-center">
-                    <h6 class="mb-0"><i class="fas fa-chart-bar"></i> K线图</h6>
-                    <div class="d-flex gap-2">
-                        <select class="form-select form-select-sm" id="timeframe-select" onchange="wsClient.changeTimeframe(this.value)" style="width: 100px;">
+
+    <div class="dashboard-grid mb-4">
+        <div class="dashboard-column">
+            <div class="card card-glass border-0">
+                <div class="card-header bg-transparent border-0 py-3">
+                    <div>
+                        <h5 class="mb-1"><i class="fas fa-tachometer-alt"></i> 账户概览</h5>
+                        <small class="text-muted">关键指标实时更新</small>
+                    </div>
+                </div>
+                <div class="card-body">
+                    <div class="row row-cols-1 row-cols-sm-2 g-3">
+                        <div class="col">
+                            <div class="card metric-card shadow-sm h-100">
+                                <div class="card-body d-flex align-items-center gap-3">
+                                    <div class="metric-icon bg-primary text-white rounded-circle d-flex align-items-center justify-content-center">
+                                        <i class="fas fa-wallet"></i>
+                                    </div>
+                                    <div>
+                                        <small class="text-muted text-uppercase">账户余额</small>
+                                        <h4 class="mb-0" id="account-balance">$0.00</h4>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col">
+                            <div class="card metric-card shadow-sm h-100">
+                                <div class="card-body d-flex align-items-center gap-3">
+                                    <div class="metric-icon bg-success text-white rounded-circle d-flex align-items-center justify-content-center">
+                                        <i class="fas fa-layer-group"></i>
+                                    </div>
+                                    <div>
+                                        <small class="text-muted text-uppercase">账户净值</small>
+                                        <h4 class="mb-0" id="account-equity">$0.00</h4>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col">
+                            <div class="card metric-card shadow-sm h-100">
+                                <div class="card-body d-flex align-items-center gap-3">
+                                    <div class="metric-icon bg-warning text-dark rounded-circle d-flex align-items-center justify-content-center">
+                                        <i class="fas fa-chart-line"></i>
+                                    </div>
+                                    <div>
+                                        <small class="text-muted text-uppercase">浮动盈亏</small>
+                                        <h4 class="mb-0" id="account-profit">$0.00</h4>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col">
+                            <div class="card metric-card shadow-sm h-100">
+                                <div class="card-body d-flex align-items-center gap-3">
+                                    <div class="metric-icon bg-info text-white rounded-circle d-flex align-items-center justify-content-center">
+                                        <i class="fas fa-clipboard-list"></i>
+                                    </div>
+                                    <div>
+                                        <small class="text-muted text-uppercase">持仓数量</small>
+                                        <h4 class="mb-0" id="positions-count">0</h4>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card card-glass border-0 equal-panel">
+                <div class="card-header bg-transparent d-flex flex-column flex-md-row align-items-start align-items-md-center justify-content-between gap-3 py-3 border-0">
+                    <div>
+                        <h5 class="mb-1"><i class="fas fa-chart-bar"></i> K线图</h5>
+                        <small class="text-muted">支持多周期切换与实时报价同步</small>
+                    </div>
+                    <div class="d-flex flex-wrap gap-2 align-items-center">
+                        <select class="form-select form-select-sm" id="timeframe-select" onchange="wsClient.changeTimeframe(this.value)" style="width: 110px;">
                             <option value="M1">1分钟</option>
                             <option value="M5">5分钟</option>
                             <option value="M15">15分钟</option>
@@ -1003,295 +1239,42 @@ class EnterpriseWebServer:
                             <option value="W1">周线</option>
                             <option value="MN1">月线</option>
                         </select>
-                        <button class="btn btn-secondary btn-sm" onclick="loadCandlesForChart()">
+                        <button class="btn btn-outline-light btn-sm" onclick="loadCandlesForChart()">
                             <i class="fas fa-sync-alt"></i> 刷新
                         </button>
                     </div>
                 </div>
-                <div class="card-body p-1">
-                    <div id="kline-chart" style="width: 100%; height: 280px;"></div>
-                    <!-- 成交量图表 -->
-                    <div id="volume-chart" style="width: 100%; height: 90px; margin-top: 5px;"></div>
+                <div class="card-body p-0">
+                    <div id="kline-chart" style="width: 100%; height: 360px;"></div>
+                    <div id="volume-chart" style="width: 100%; height: 110px; margin-top: 10px;"></div>
                 </div>
             </div>
-            
-            <!-- K线浮动提示 -->
-            <div id="kline-tooltip" style="position: fixed; z-index: 10000; background: rgba(0, 0, 0, 0.95); border: 1px solid #444; border-radius: 8px; padding: 12px; color: white; font-size: 12px; display: none; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5); min-width: 200px;">
+            <div id="kline-tooltip" class="tooltip-panel shadow-lg">
                 <table style="width: 100%;">
-                    <tr><td style="color: #888; padding: 2px 4px;">开盘:</td><td id="tt-open" style="padding: 2px 4px;">-</td></tr>
-                    <tr><td style="color: #888; padding: 2px 4px;">最高:</td><td id="tt-high" style="padding: 2px 4px;">-</td></tr>
-                    <tr><td style="color: #888; padding: 2px 4px;">最低:</td><td id="tt-low" style="padding: 2px 4px;">-</td></tr>
-                    <tr><td style="color: #888; padding: 2px 4px;">收盘:</td><td id="tt-close" style="padding: 2px 4px;">-</td></tr>
-                    <tr><td style="color: #888; padding: 2px 4px;">涨跌:</td><td id="tt-change" style="padding: 2px 4px;">-</td></tr>
-                    <tr><td style="color: #888; padding: 2px 4px;">涨幅:</td><td id="tt-change-percent" style="padding: 2px 4px;">-</td></tr>
-                    <tr><td style="color: #888; padding: 2px 4px;">振幅:</td><td id="tt-amplitude" style="padding: 2px 4px;">-</td></tr>
-                    <tr><td style="color: #888; padding: 2px 4px;">成交量:</td><td id="tt-volume" style="padding: 2px 4px;">-</td></tr>
+                    <tr><td class="text-secondary">开盘:</td><td id="tt-open">-</td></tr>
+                    <tr><td class="text-secondary">最高:</td><td id="tt-high">-</td></tr>
+                    <tr><td class="text-secondary">最低:</td><td id="tt-low">-</td></tr>
+                    <tr><td class="text-secondary">收盘:</td><td id="tt-close">-</td></tr>
+                    <tr><td class="text-secondary">涨跌:</td><td id="tt-change">-</td></tr>
+                    <tr><td class="text-secondary">涨幅:</td><td id="tt-change-percent">-</td></tr>
+                    <tr><td class="text-secondary">振幅:</td><td id="tt-amplitude">-</td></tr>
+                    <tr><td class="text-secondary">成交量:</td><td id="tt-volume">-</td></tr>
                 </table>
             </div>
-            
-            <!-- 指标图区域 - 更紧凑的布局 -->
-            <div class="row mt-2 g-2">
-                <div class="col-md-4">
-                    <div class="card h-100">
-                        <div class="card-header bg-dark text-white py-1 px-2">
-                            <h6 class="mb-0 small"><i class="fas fa-chart-line"></i> MACD</h6>
-                        </div>
-                        <div class="card-body p-1">
-                            <div id="macd-chart" style="width: 100%; height: 110px;"></div>
-                        </div>
+
+            <div class="card card-glass border-0 equal-panel">
+                <div class="card-header bg-transparent d-flex justify-content-between align-items-center py-3 border-0">
+                    <div>
+                        <h5 class="mb-1"><i class="fas fa-list"></i> 当前持仓</h5>
+                        <small class="text-muted">持仓明细与平仓操作</small>
                     </div>
-                </div>
-                <div class="col-md-4">
-                    <div class="card h-100">
-                        <div class="card-header bg-dark text-white py-1 px-2">
-                            <h6 class="mb-0 small"><i class="fas fa-chart-area"></i> RSI</h6>
-                        </div>
-                        <div class="card-body p-1">
-                            <div id="rsi-chart" style="width: 100%; height: 110px;"></div>
-                        </div>
-                    </div>
-                </div>
-                <div class="col-md-4">
-                    <div class="card h-100">
-                        <div class="card-header bg-dark text-white py-1 px-2">
-                            <h6 class="mb-0 small"><i class="fas fa-chart-bar"></i> KDJ</h6>
-                        </div>
-                        <div class="card-body p-1">
-                            <div id="kdj-chart" style="width: 100%; height: 110px;"></div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-    
-    <div class="row mb-3">
-        <div class="col-md-5">
-            <div class="card">
-                <div class="card-header bg-dark text-white py-2">
-                    <h6 class="mb-0"><i class="fas fa-tags"></i> 实时价格</h6>
-                </div>
-                <div class="card-body py-2 text-center">
-                    <h5 id="price-symbol">XAUUSD</h5>
-                    <h3 id="price-value">--</h3>
-                    <div class="row mt-2">
-                        <div class="col-6">
-                            <p class="mb-1 text-danger">买价 (Bid)</p>
-                            <h5 id="price-bid">--</h5>
-                        </div>
-                        <div class="col-6">
-                            <p class="mb-1 text-success">卖价 (Ask)</p>
-                            <h5 id="price-ask">--</h5>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-        <div class="col-md-7">
-            <div class="card">
-                <div class="card-header bg-dark text-white py-2">
-                    <h6 class="mb-0"><i class="fas fa-chart-area"></i> OHLC数据</h6>
-                </div>
-                <div class="card-body py-2">
-                    <div class="row">
-                        <div class="col-3 mb-2">
-                            <div class="card bg-light border-secondary">
-                                <div class="card-body py-2">
-                                    <h6 class="text-muted mb-1">开盘</h6>
-                                    <h6 id="ohlc-open" class="text-dark mb-0">--</h6>
-                                </div>
-                            </div>
-                        </div>
-                        <div class="col-3 mb-2">
-                            <div class="card bg-light border-danger">
-                                <div class="card-body py-2">
-                                    <h6 class="text-muted mb-1">最高</h6>
-                                    <h6 id="ohlc-high" class="text-danger mb-0">--</h6>
-                                </div>
-                            </div>
-                        </div>
-                        <div class="col-3 mb-2">
-                            <div class="card bg-light border-success">
-                                <div class="card-body py-2">
-                                    <h6 class="text-muted mb-1">最低</h6>
-                                    <h6 id="ohlc-low" class="text-success mb-0">--</h6>
-                                </div>
-                            </div>
-                        </div>
-                        <div class="col-3 mb-2">
-                            <div class="card bg-light border-info">
-                                <div class="card-body py-2">
-                                    <h6 class="text-muted mb-1">收盘</h6>
-                                    <h6 id="ohlc-close" class="text-info mb-0">--</h6>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="row">
-                        <div class="col-12">
-                            <div class="card bg-light">
-                                <div class="card-body py-2">
-                                    <h6 class="text-muted mb-1">成交量 (Volume)</h6>
-                                    <h6 id="ohlc-volume" class="text-secondary mb-0">--</h6>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-    
-    <!-- AI智能分析模块 -->
-    <div class="row mb-3">
-        <div class="col-md-12">
-            <div class="card">
-                <div class="card-header bg-gradient text-white py-2 d-flex justify-content-between align-items-center" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);">
-                    <h6 class="mb-0"><i class="fas fa-robot"></i> AI智能分析</h6>
-                    <button class="btn btn-light btn-sm" onclick="refreshAIAnalysis()">
-                        <i class="fas fa-sync-alt"></i> 刷新
-                    </button>
-                </div>
-                <div class="card-body py-3">
-                    <div class="row">
-                        <!-- AI信号显示 -->
-                        <div class="col-md-4">
-                            <div class="text-center">
-                                <h6 class="text-muted mb-2">AI交易信号</h6>
-                                <div id="ai-signal-indicator" class="display-4 text-secondary">
-                                    <i class="fas fa-circle"></i>
-                                </div>
-                                <div id="ai-signal-text" class="h5 mb-1">等待分析...</div>
-                                <div id="ai-signal-confidence" class="text-muted small">置信度: --</div>
-                            </div>
-                        </div>
-                        <!-- AI推荐参数 -->
-                        <div class="col-md-4">
-                            <h6 class="text-muted mb-2">推荐交易参数</h6>
-                            <div class="row g-2">
-                                <div class="col-6">
-                                    <div class="card bg-light p-2">
-                                        <small class="text-muted">推荐手数</small>
-                                        <div id="ai-rec-lot" class="h5 mb-0">--</div>
-                                    </div>
-                                </div>
-                                <div class="col-6">
-                                    <div class="card bg-light p-2">
-                                        <small class="text-muted">止损点数</small>
-                                        <div id="ai-rec-sl" class="h5 mb-0">--</div>
-                                    </div>
-                                </div>
-                                <div class="col-6">
-                                    <div class="card bg-light p-2">
-                                        <small class="text-muted">止盈点数</small>
-                                        <div id="ai-rec-tp" class="h5 mb-0">--</div>
-                                    </div>
-                                </div>
-                                <div class="col-6">
-                                    <div class="card bg-light p-2">
-                                        <small class="text-muted">市场状态</small>
-                                        <div id="ai-market-regime" class="h5 mb-0">--</div>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                        <!-- AI操作按钮 -->
-                        <div class="col-md-4">
-                            <h6 class="text-muted mb-2">AI辅助交易</h6>
-                            <div class="d-grid gap-2">
-                                <button id="ai-buy-btn" class="btn btn-success" onclick="executeAITrade('buy')" disabled>
-                                    <i class="fas fa-arrow-up"></i> AI指导做多
-                                </button>
-                                <button id="ai-sell-btn" class="btn btn-danger" onclick="executeAITrade('sell')" disabled>
-                                    <i class="fas fa-arrow-down"></i> AI指导做空
-                                </button>
-                            </div>
-                            <div id="ai-reason" class="mt-2 small text-muted text-center">
-                                --
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-    
-    <!-- LLM 智能分析模块 -->
-    <div class="row mb-3">
-        <div class="col-md-12">
-            <div class="card">
-                <div class="card-header bg-gradient text-white py-2 d-flex justify-content-between align-items-center" style="background: linear-gradient(135deg, #8B5CF6 0%, #EC4899 100%);">
-                    <h6 class="mb-0"><i class="fas fa-brain"></i> LLM 深度分析</h6>
-                    <span id="llm-status" class="badge bg-light text-dark small">未配置</span>
-                </div>
-                <div class="card-body py-3">
-                    <div id="llm-analysis-container">
-                        <div id="llm-loading" class="text-center text-muted py-4" style="display: none;">
-                            <i class="fas fa-spinner fa-spin fa-2x mb-3"></i>
-                            <p>正在获取 LLM 分析...</p>
-                        </div>
-                        <div id="llm-result" class="llm-analysis">
-                            <p class="text-muted text-center">请先在系统设置中配置 LLM</p>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-    
-    <div class="row mb-3">
-        <div class="col-md-12">
-            <div class="card">
-                <div class="card-header bg-dark text-white py-2 d-flex justify-content-between">
-                    <h6 class="mb-0"><i class="fas fa-bolt"></i> 快速交易</h6>
-                </div>
-                <div class="card-body py-2">
-                    <div class="row">
-                        <div class="col-md-3 mb-2">
-                            <label class="mb-1">手数</label>
-                            <input type="number" class="form-control form-control-sm" id="quick-lot" value="0.1" step="0.01">
-                        </div>
-                        <div class="col-md-2 mb-2">
-                            <label class="mb-1">止损</label>
-                            <input type="number" class="form-control form-control-sm" id="quick-sl" value="50">
-                        </div>
-                        <div class="col-md-2 mb-2">
-                            <label class="mb-1">止盈</label>
-                            <input type="number" class="form-control form-control-sm" id="quick-tp" value="100">
-                        </div>
-                        <div class="col-md-5 mb-2">
-                            <label class="mb-1">操作</label>
-                            <div class="row">
-                                <div class="col-6">
-                                    <button class="btn btn-success btn-sm w-100" onclick="quickTrade('buy')">
-                                        <i class="fas fa-arrow-up"></i> 做多
-                                    </button>
-                                </div>
-                                <div class="col-6">
-                                    <button class="btn btn-danger btn-sm w-100" onclick="quickTrade('sell')">
-                                        <i class="fas fa-arrow-down"></i> 做空
-                                    </button>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-    
-    <div class="row">
-        <div class="col-md-12">
-            <div class="card">
-                <div class="card-header bg-dark text-white py-2 d-flex justify-content-between">
-                    <h6 class="mb-0"><i class="fas fa-list"></i> 当前持仓</h6>
                     <button class="btn btn-danger btn-sm" onclick="closeAllPositions()">
-                        <i class="fas fa-times-circle"></i> 全部平仓
+                        <i class="fas fa-times-circle me-1"></i> 全部平仓
                     </button>
                 </div>
-                <div class="card-body p-0">
-                    <table class="table table-striped table-hover mb-0 table-sm">
-                        <thead class="table-dark">
+                <div class="card-body p-0 overflow-auto">
+                    <table class="table table-dark table-borderless align-middle mb-0">
+                        <thead>
                             <tr>
                                 <th>品种</th>
                                 <th>方向</th>
@@ -1313,10 +1296,84 @@ class EnterpriseWebServer:
                 </div>
             </div>
         </div>
+        <div class="dashboard-column">
+            <div class="card card-glass border-0 equal-panel">
+                <div class="card-header bg-transparent border-0 py-3">
+                    <div>
+                        <h5 class="mb-1"><i class="fas fa-brain"></i> LLM 深度分析</h5>
+                        <small class="text-muted">智能分析结果与信号提示</small>
+                    </div>
+                    <span id="llm-status" class="badge bg-light text-dark small">未配置</span>
+                </div>
+                <div class="card-body py-4" id="llm-analysis-container">
+                    <div id="llm-loading" class="text-center text-muted py-4" style="display: none;">
+                        <i class="fas fa-spinner fa-spin fa-2x mb-3"></i>
+                        <p>正在获取 LLM 分析...</p>
+                    </div>
+                    <div id="llm-result" class="llm-analysis text-muted">
+                        请先在系统设置中配置 LLM
+                    </div>
+                </div>
+            </div>
+            <div class="card card-glass border-0 equal-panel">
+                <div class="card-header bg-transparent border-0 py-3">
+                    <h5 class="mb-1"><i class="fas fa-tags"></i> 实时价格</h5>
+                    <small class="text-muted">市场深度与最新买卖价</small>
+                </div>
+                <div class="card-body text-center py-4">
+                    <h5 class="text-uppercase text-muted" id="price-symbol">XAUUSD</h5>
+                    <h1 class="display-5 fw-bold" id="price-value">--</h1>
+                    <div class="row mt-4 g-2">
+                        <div class="col-6">
+                            <div class="price-box bg-dark text-danger rounded-3 p-3">
+                                <small class="text-muted">买价</small>
+                                <div id="price-bid" class="fs-5">--</div>
+                            </div>
+                        </div>
+                        <div class="col-6">
+                            <div class="price-box bg-dark text-success rounded-3 p-3">
+                                <small class="text-muted">卖价</small>
+                                <div id="price-ask" class="fs-5">--</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="card card-glass border-0 equal-panel">
+                <div class="card-header bg-transparent border-0 py-3">
+                    <h5 class="mb-1"><i class="fas fa-bolt"></i> 快速交易</h5>
+                    <small class="text-muted">一键做多/做空</small>
+                </div>
+                <div class="card-body py-3">
+                    <div class="mb-3">
+                        <label class="form-label">手数</label>
+                        <input type="number" class="form-control form-control-sm" id="quick-lot" value="0.1" step="0.01">
+                    </div>
+                    <div class="row g-2 mb-3">
+                        <div class="col-6">
+                            <label class="form-label">止损</label>
+                            <input type="number" class="form-control form-control-sm" id="quick-sl" value="50">
+                        </div>
+                        <div class="col-6">
+                            <label class="form-label">止盈</label>
+                            <input type="number" class="form-control form-control-sm" id="quick-tp" value="100">
+                        </div>
+                    </div>
+                    <div class="d-grid gap-2">
+                        <button class="btn btn-success btn-lg" onclick="quickTrade('buy')">
+                            <i class="fas fa-arrow-up me-2"></i> 做多
+                        </button>
+                        <button class="btn btn-danger btn-lg" onclick="quickTrade('sell')">
+                            <i class="fas fa-arrow-down me-2"></i> 做空
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
     </div>
 </div>
 """
-    
+
     def _trade_page(self):
         """交易页面"""
         return """
@@ -1524,120 +1581,6 @@ class EnterpriseWebServer:
         </div>
     </div>
     
-    <!-- AI 模型设置 -->
-    <div class="card mb-4">
-        <div class="card-header bg-gradient text-white" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);">
-            <h5><i class="fas fa-robot"></i> AI 模型设置</h5>
-        </div>
-        <div class="card-body">
-            <!-- AI 总开关 -->
-            <div class="mb-4">
-                <div class="form-check form-switch">
-                    <input class="form-check-input" type="checkbox" id="ai-enabled" {"checked" if ai_enabled else ""}>
-                    <label class="form-check-label">启用 AI 功能</label>
-                </div>
-            </div>
-            
-            <!-- TradingView 风格 AI 分析器 -->
-            <div class="row mb-3">
-                <div class="col-md-12">
-                    <div class="form-check form-switch mb-3">
-                        <input class="form-check-input" type="checkbox" id="ai-tv-enabled" {"checked" if tv_enabled else ""}>
-                        <label class="form-check-label"><i class="fas fa-chart-line"></i> TradingView 风格技术分析</label>
-                    </div>
-                </div>
-            </div>
-            
-            <hr>
-            <h6 class="mb-3"><i class="fas fa-cog"></i> 技术指标参数</h6>
-            
-            <div class="row">
-                <div class="col-md-4">
-                    <div class="mb-3">
-                        <label>RSI 周期</label>
-                        <input type="number" class="form-control" id="ai-rsi-period" value="{rsi_period}" min="2" max="50">
-                    </div>
-                </div>
-                <div class="col-md-4">
-                    <div class="mb-3">
-                        <label>RSI 超卖线</label>
-                        <input type="number" class="form-control" id="ai-rsi-oversold" value="{rsi_oversold}" min="10" max="40">
-                    </div>
-                </div>
-                <div class="col-md-4">
-                    <div class="mb-3">
-                        <label>RSI 超买线</label>
-                        <input type="number" class="form-control" id="ai-rsi-overbought" value="{rsi_overbought}" min="60" max="90">
-                    </div>
-                </div>
-            </div>
-            
-            <div class="row">
-                <div class="col-md-4">
-                    <div class="mb-3">
-                        <label>MACD 快线周期</label>
-                        <input type="number" class="form-control" id="ai-macd-fast" value="{macd_fast}" min="5" max="20">
-                    </div>
-                </div>
-                <div class="col-md-4">
-                    <div class="mb-3">
-                        <label>MACD 慢线周期</label>
-                        <input type="number" class="form-control" id="ai-macd-slow" value="{macd_slow}" min="20" max="50">
-                    </div>
-                </div>
-                <div class="col-md-4">
-                    <div class="mb-3">
-                        <label>MACD 信号线周期</label>
-                        <input type="number" class="form-control" id="ai-macd-signal" value="{macd_signal}" min="5" max="20">
-                    </div>
-                </div>
-            </div>
-            
-            <div class="row">
-                <div class="col-md-6">
-                    <div class="mb-3">
-                        <label>布林带周期</label>
-                        <input type="number" class="form-control" id="ai-bb-period" value="{bb_period}" min="5" max="50">
-                    </div>
-                </div>
-                <div class="col-md-6">
-                    <div class="mb-3">
-                        <label>布林带标准差</label>
-                        <input type="number" class="form-control" id="ai-bb-std" value="{bb_std}" step="0.1" min="0.5" max="4">
-                    </div>
-                </div>
-            </div>
-            
-            <hr>
-            <h6 class="mb-3"><i class="fas fa-sync"></i> 信号融合参数</h6>
-            
-            <div class="row">
-                <div class="col-md-6">
-                    <div class="mb-3">
-                        <label>最小置信度阈值</label>
-                        <input type="number" class="form-control" id="ai-min-confidence" value="{min_confidence}" step="0.05" min="0.1" max="0.9">
-                    </div>
-                </div>
-                <div class="col-md-6">
-                    <div class="mb-3">
-                        <div class="form-check form-switch mt-4">
-                            <input class="form-check-input" type="checkbox" id="ai-use-weighted" {"checked" if use_weighted_average else ""}>
-                            <label class="form-check-label">使用加权平均融合</label>
-                        </div>
-                    </div>
-                </div>
-            </div>
-            
-            <hr>
-            <h6 class="mb-3"><i class="fas fa-shield-alt"></i> 动态风控设置</h6>
-            
-            <div class="form-check form-switch mb-3">
-                <input class="form-check-input" type="checkbox" id="ai-dynamic-risk" {"checked" if dynamic_risk_enabled else ""}>
-                <label class="form-check-label">启用 AI 动态风控</label>
-            </div>
-        </div>
-    </div>
-    
     <!-- LLM 大语言模型设置 -->
     <div class="card mb-4">
         <div class="card-header bg-gradient text-white" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);">
@@ -1731,5 +1674,78 @@ class EnterpriseWebServer:
     <button class="btn btn-primary btn-lg w-100" onclick="saveSettings()">
         <i class="fas fa-save"></i> 保存所有设置
     </button>
+</div>
+"""
+    
+    def _llm_history_page(self):
+        """LLM 历史记录页面"""
+        return """
+<div id="page-llm-history" class="page-content">
+    <h2 class="mb-4"><i class="fas fa-history"></i> LLM 分析历史记录</h2>
+    
+    <div class="row mb-3">
+        <div class="col-md-3">
+            <select class="form-select" id="history-filter-symbol">
+                <option value="">全部品种</option>
+                <option value="XAUUSD">XAUUSD</option>
+            </select>
+        </div>
+        <div class="col-md-3">
+            <select class="form-select" id="history-filter-limit">
+                <option value="20">显示最近20条</option>
+                <option value="50" selected>显示最近50条</option>
+                <option value="100">显示最近100条</option>
+            </select>
+        </div>
+        <div class="col-md-6 text-end">
+            <button class="btn btn-primary" onclick="refreshLLMHistory()">
+                <i class="fas fa-sync-alt"></i> 刷新记录
+            </button>
+        </div>
+    </div>
+    
+    <ul class="nav nav-tabs mb-3" id="history-tabs">
+        <li class="nav-item">
+            <a class="nav-link active" id="tab-analysis" data-tab="analysis" href="#">
+                <i class="fas fa-chart-pie"></i> 持仓分析记录
+            </a>
+        </li>
+        <li class="nav-item">
+            <a class="nav-link" id="tab-conversations" data-tab="conversations" href="#">
+                <i class="fas fa-comments"></i> 对话记录
+            </a>
+        </li>
+    </ul>
+    
+    <div class="card">
+        <div class="card-body p-0">
+            <div id="history-content" class="p-3">
+                <div id="history-loading" class="text-center text-muted py-4">
+                    <i class="fas fa-spinner fa-spin fa-2x mb-3"></i>
+                    <p>正在加载历史记录...</p>
+                </div>
+                <div id="history-data"></div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- 对话详情模态框 -->
+    <div class="modal fade" id="conversationModal" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header bg-dark text-white">
+                    <h5 class="modal-title">
+                        <i class="fas fa-comments"></i> 对话详情 <span id="modal-conversation-id"></span>
+                    </h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body" id="modal-conversation-content" style="max-height: 60vh; overflow-y: auto;">
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button>
+                </div>
+            </div>
+        </div>
+    </div>
 </div>
 """

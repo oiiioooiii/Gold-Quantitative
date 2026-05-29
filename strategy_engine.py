@@ -1,4 +1,6 @@
 # 策略引擎模块
+import threading
+import time
 import MetaTrader5 as mt5
 from typing import Dict, Any, Optional, Tuple
 from utils.logger import get_logger
@@ -42,15 +44,21 @@ class StrategyEngine:
         self.logger = get_logger()
         self.trading_config = config.get('trading', {})
         
-        # AI功能配置
+        # AI功能配置（始终启用，因为我们只使用LLM）
         self.ai_config = config.get('ai', {})
-        self.ai_enabled = self.ai_config.get('enabled', False)
+        self.ai_enabled = True
         self.ai_auto_trade = self.ai_config.get('auto_trade', False)
         self.logger.info(f"AI功能初始化: enabled={self.ai_enabled}, auto_trade={self.ai_auto_trade}")
+        
+        # 后台自动分析线程
+        self.auto_analysis_enabled = True
+        self.auto_analysis_thread = None
+        self.analysis_interval = 30  # 30秒分析一次
+        self.last_analysis_time = 0
     
     def get_ai_analysis(self, symbol: Optional[str] = None) -> Dict[str, Any]:
         """
-        获取AI分析结果
+        获取AI分析结果（仅LLM深度分析）
         
         Args:
             symbol: 交易品种
@@ -58,40 +66,53 @@ class StrategyEngine:
         Returns:
             AI分析结果字典
         """
-        if not self.ai_enabled or not self.ai_model_manager or not self.data_collector:
-            return {"enabled": False, "error": "AI功能未启用"}
+        if not self.ai_model_manager or not self.data_collector:
+            self.logger.error("AI功能未初始化: ai_model_manager 或 data_collector 为空")
+            return {"enabled": False, "error": "AI功能未初始化"}
         
         try:
             symbol = symbol or self.trading_config.get('symbol', 'XAUUSD')
             
+            # 0. 检查是否有持仓
+            positions = self.mt5.get_positions(symbol) if self.mt5 else []
+            has_positions = len(positions) > 0
+            
             # 1. 获取AI特征
             features = self.data_collector.get_ai_features(symbol)
             
-            # 2. 生成AI信号
-            signals = self.ai_model_manager.generate_signals(features)
-            combined_signal = self.ai_model_manager.get_combined_signal(features)
-            
-            # 3. 计算风控参数
-            risk_params = None
-            if combined_signal:
-                risk_params = self.risk_manager.calculate_risk_params_with_ai(
-                    symbol, features, combined_signal.confidence
-                )
-            
-            # 4. 获取 LLM 分析（如果启用）
+            # 2. 检查 LLM 配置
             llm_analysis = None
             llm_enabled = False
+            
+            # 调试日志
+            self.logger.info(f"AI 模型管理器中的模型: {list(self.ai_model_manager.models.keys())}")
+            self.logger.info(f"AI 模型管理器激活的模型: {list(self.ai_model_manager.active_models)}")
+            self.logger.info(f"当前是否有持仓: {has_positions}")
+            
             if 'llm' in self.ai_model_manager.models:
                 llm_model = self.ai_model_manager.models['llm']
-                if llm_model.enabled and llm_model.config.get('api_key'):
-                    llm_enabled = True
-                    try:
-                        llm_result = llm_model.predict(features)
-                        llm_analysis = llm_result.get('analysis', '')
-                        self.logger.info("LLM 分析成功")
-                    except Exception as e:
-                        self.logger.error(f"LLM 分析失败: {e}")
-                        llm_analysis = "LLM 分析暂不可用"
+                self.logger.info(f"LLM 模型 enabled: {llm_model.enabled}")
+                self.logger.info(f"LLM 模型 API 密钥是否设置: {'是' if llm_model.config.get('api_key') else '否'}")
+                
+                llm_configured = llm_model.enabled and llm_model.config.get('api_key')
+                llm_enabled = llm_configured
+                
+                if llm_configured:
+                    if has_positions:
+                        # 有持仓时才进行深度分析
+                        try:
+                            llm_result = llm_model.predict(features)
+                            llm_analysis = llm_result.get('analysis', '')
+                            self.logger.info("LLM 深度分析成功")
+                        except Exception as e:
+                            self.logger.error(f"LLM 分析失败: {e}")
+                            llm_analysis = "LLM 分析暂不可用"
+                    else:
+                        # 无持仓时给出明确提示
+                        llm_analysis = "当前无持仓，LLM 深度分析将在您开仓后自动启动，为您的持仓提供风险评估和止损建议。"
+                        self.logger.info("无持仓，返回提示信息而非LLM分析")
+            else:
+                self.logger.warning("AI 模型管理器中没有找到 LLM 模型")
             
             # 安全的类型转换
             def safe_convert(obj):
@@ -100,6 +121,8 @@ class StrategyEngine:
                     return {key: safe_convert(value) for key, value in obj.items()}
                 elif isinstance(obj, list):
                     return [safe_convert(item) for item in obj]
+                elif isinstance(obj, bool):
+                    return obj  # 明确保留布尔值
                 elif isinstance(obj, np.integer):
                     return int(obj)
                 elif isinstance(obj, np.floating):
@@ -119,15 +142,16 @@ class StrategyEngine:
                     "volatility_20": features.get('volatility_20', 0),
                     "price_position_20": features.get('price_position_20', 0.5)
                 },
-                "signals": [s.to_dict() for s in signals] if signals else [],
-                "combined_signal": combined_signal.to_dict() if combined_signal else None,
-                "risk_params": safe_convert(risk_params) if risk_params else None,
                 "symbol": symbol,
-                "llm_enabled": llm_enabled,
+                "has_positions": has_positions,  # 新增字段，告知前端是否有持仓
+                "llm_enabled": bool(llm_enabled),  # 确保是布尔值
                 "llm_analysis": llm_analysis
             }
             
-            return safe_convert(result)
+            self.logger.info(f"返回 LLM 分析结果: llm_enabled={llm_enabled}, has_positions={has_positions}, 类型={type(llm_enabled)}")
+            result_safe = safe_convert(result)
+            self.logger.info(f"转换后的结果: llm_enabled={result_safe['llm_enabled']}, 类型={type(result_safe['llm_enabled'])}")
+            return result_safe
             
         except Exception as e:
             self.logger.error(f"获取AI分析失败: {e}")
@@ -383,3 +407,241 @@ class StrategyEngine:
         self.logger.info(msg)
         
         return True, msg, {"closed_count": closed_count}
+    
+    def get_dynamic_stop_loss(self, symbol: Optional[str] = None, auto_execute: bool = False) -> Dict[str, Any]:
+        """
+        获取动态止损建议
+        
+        Args:
+            symbol: 交易品种
+            auto_execute: 是否自动执行平仓
+            
+        Returns:
+            止损建议字典
+        """
+        symbol = symbol or self.trading_config.get('symbol', 'XAUUSD')
+        
+        try:
+            # 1. 获取当前持仓
+            positions = self.mt5.get_positions(symbol)
+            
+            if not positions:
+                return {
+                    "has_position": False,
+                    "advice": "当前无持仓",
+                    "llm_used": False
+                }
+            
+            # 2. 获取市场特征
+            features = self.data_collector.get_ai_features(symbol) if self.data_collector else {}
+            
+            # 3. 检查 LLM
+            if not self.ai_model_manager or 'llm' not in self.ai_model_manager.models:
+                return {
+                    "has_position": True,
+                    "positions": self._format_positions(positions),
+                    "advice": "LLM 未配置",
+                    "llm_used": False
+                }
+            
+            llm_model = self.ai_model_manager.models['llm']
+            if not llm_model.enabled or not llm_model.config.get('api_key'):
+                return {
+                    "has_position": True,
+                    "positions": self._format_positions(positions),
+                    "advice": "LLM 未启用或未配置 API Key",
+                    "llm_used": False
+                }
+            
+            # 4. 为每个持仓获取止损建议
+            stop_loss_results = []
+            closed_positions = []
+            
+            for position in positions:
+                position_info = {
+                    "ticket": position.ticket,
+                    "symbol": position.symbol,
+                    "type": "BUY" if position.type == 0 else "SELL",
+                    "volume": position.volume,
+                    "open_price": position.price_open,
+                    "current_price": position.price_current,
+                    "profit": position.profit,
+                    "sl": position.sl,
+                    "tp": position.tp
+                }
+                
+                # 获取 LLM 止损建议
+                stop_loss_advice = llm_model.get_stop_loss_advice(features, position_info)
+                stop_loss_advice["position_info"] = position_info
+                stop_loss_results.append(stop_loss_advice)
+                
+                # 如果需要自动执行且 LLM 建议平仓
+                if auto_execute and stop_loss_advice.get("should_close"):
+                    self.logger.info(f"LLM 建议平仓，执行自动平仓: {position.ticket}")
+                    result = self.mt5.close_position(position.ticket)
+                    if result:
+                        closed_positions.append({
+                            "ticket": position.ticket,
+                            "reason": stop_loss_advice.get("reason", "LLM 建议平仓")
+                        })
+                        self.notifier.notify_order_closed(
+                            symbol, 
+                            "LLM_AUTO_CLOSE", 
+                            position.volume, 
+                            position.profit, 
+                            None, 
+                            f"LLM 自动平仓: {stop_loss_advice.get('reason', '')}"
+                        )
+            
+            return {
+                "has_position": True,
+                "positions": self._format_positions(positions),
+                "stop_loss_advice": stop_loss_results,
+                "closed_positions": closed_positions,
+                "auto_executed": auto_execute,
+                "llm_used": True
+            }
+            
+        except Exception as e:
+            self.logger.error(f"获取动态止损失败: {e}")
+            import traceback
+            self.logger.error(f"堆栈: {traceback.format_exc()}")
+            return {
+                "has_position": False,
+                "advice": f"获取动态止损失败: {str(e)}",
+                "llm_used": False,
+                "error": str(e)
+            }
+    
+    def _format_positions(self, positions) -> List[Dict[str, Any]]:
+        """格式化持仓信息"""
+        result = []
+        for pos in positions:
+            result.append({
+                "ticket": pos.ticket,
+                "symbol": pos.symbol,
+                "type": "BUY" if pos.type == 0 else "SELL",
+                "volume": pos.volume,
+                "open_price": pos.price_open,
+                "current_price": pos.price_current,
+                "profit": pos.profit,
+                "sl": pos.sl,
+                "tp": pos.tp
+            })
+        return result
+    
+    def start_auto_analysis(self):
+        """启动后台自动分析线程"""
+        if self.auto_analysis_thread and self.auto_analysis_thread.is_alive():
+            self.logger.info("后台分析线程已在运行")
+            return
+        
+        self.auto_analysis_enabled = True
+        self.auto_analysis_thread = threading.Thread(target=self._auto_analysis_loop, daemon=True)
+        self.auto_analysis_thread.start()
+        self.logger.info("后台自动分析线程已启动")
+    
+    def stop_auto_analysis(self):
+        """停止后台自动分析线程"""
+        self.auto_analysis_enabled = False
+        if self.auto_analysis_thread:
+            self.auto_analysis_thread.join(timeout=5)
+            self.logger.info("后台自动分析线程已停止")
+    
+    def _auto_analysis_loop(self):
+        """后台分析循环"""
+        self.logger.info("后台分析循环开始")
+        
+        while self.auto_analysis_enabled:
+            try:
+                # 检查是否到了分析时间
+                current_time = time.time()
+                if current_time - self.last_analysis_time < self.analysis_interval:
+                    time.sleep(1)
+                    continue
+                
+                self.last_analysis_time = current_time
+                
+                # 执行分析
+                self._perform_auto_analysis()
+                
+            except Exception as e:
+                self.logger.error(f"后台分析出错: {e}")
+                import traceback
+                self.logger.error(f"堆栈: {traceback.format_exc()}")
+                time.sleep(5)
+        
+        self.logger.info("后台分析循环结束")
+    
+    def _perform_auto_analysis(self):
+        """执行自动分析"""
+        symbol = self.trading_config.get('symbol', 'XAUUSD')
+        
+        # 1. 检查是否有持仓
+        positions = self.mt5.get_positions(symbol)
+        if not positions:
+            self.logger.debug("无持仓，跳过分析")
+            return
+        
+        self.logger.info(f"开始自动分析 {len(positions)} 个持仓")
+        
+        # 2. 获取市场特征
+        if not self.data_collector:
+            self.logger.warning("data_collector 未初始化")
+            return
+        
+        features = self.data_collector.get_ai_features(symbol)
+        
+        # 3. 检查 LLM 配置
+        if not self.ai_model_manager or 'llm' not in self.ai_model_manager.models:
+            self.logger.warning("LLM 未配置")
+            return
+        
+        llm_model = self.ai_model_manager.models['llm']
+        if not llm_model.enabled or not llm_model.config.get('api_key'):
+            self.logger.debug("LLM 未启用或未配置")
+            return
+        
+        # 4. 为每个持仓分析
+        closed_count = 0
+        for position in positions:
+            position_info = {
+                "ticket": position.ticket,
+                "symbol": position.symbol,
+                "type": "BUY" if position.type == 0 else "SELL",
+                "volume": position.volume,
+                "open_price": position.price_open,
+                "current_price": position.price_current,
+                "profit": position.profit,
+                "sl": position.sl,
+                "tp": position.tp
+            }
+            
+            try:
+                # 获取 LLM 建议
+                advice = llm_model.get_stop_loss_advice(features, position_info)
+                
+                # 检查是否需要平仓
+                if advice.get('should_close', False):
+                    self.logger.warning(f"LLM 建议平仓: ticket={position.ticket}, reason={advice.get('reason', '')}")
+                    
+                    # 执行平仓
+                    result = self.mt5.close_position(position.ticket)
+                    if result:
+                        closed_count += 1
+                        self.logger.info(f"自动平仓成功: ticket={position.ticket}, profit={position.profit}")
+                        
+                        # 发送通知
+                        self.notifier.send_notification(
+                            "LLM 自动平仓",
+                            f"已平仓 {position_info['type']} {position.volume} 手，盈亏: {position.profit:.2f}\n原因: {advice.get('reason', '')}",
+                            "warning"
+                        )
+                    
+            except Exception as e:
+                self.logger.error(f"分析持仓 {position.ticket} 失败: {e}")
+        
+        if closed_count > 0:
+            self.logger.info(f"自动分析完成，平仓 {closed_count} 个")
+        else:
+            self.logger.debug("自动分析完成，无需平仓")
