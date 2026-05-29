@@ -1,0 +1,53 @@
+ai:
+  enabled: false
+  feature_window: 100
+  model_path: ./models/gold_trading_model.pth
+data_collection:
+  collect_interval: 3600
+  enabled: false
+  intervals:
+  - 1H
+  - 4H
+  - D1
+  save_path: ./data
+logging:
+  backup_count: 5
+  file_path: ./logs/trading_bot.log
+  level: INFO
+  max_bytes: 10485760
+mt5:
+  login: 107664568
+  password: 2tToI-Ey
+  path: C:\Program Files\MetaTrader 5\terminal64.exe
+  server: MetaQuotes-Demo
+notification:
+  email:
+    enabled: false
+    password: your_email_password
+    recipient: recipient@example.com
+    smtp_port: 587
+    smtp_server: smtp.example.com
+    username: your_email@example.com
+  telegram:
+    chat_id: your_chat_id
+    enabled: false
+    token: your_telegram_bot_token
+risk:
+  check_margin: true
+  dynamic_position: false
+  max_positions_per_direction: 1
+  max_total_positions: 10
+  min_sl_distance: 20
+  risk_percent: 1.0
+trading:
+  allow_reverse: false
+  lot_size: 1
+  max_lot: 100
+  order_type: market
+  sl_points: 500
+  symbol: XAUUSD
+  tp_points: 10000
+webhook:
+  host: 0.0.0.0
+  port: 8000
+  secret_key: ''

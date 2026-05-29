@@ -1,0 +1,22 @@
+# 黄金量化交易系统 - 依赖包
+
+# Web 框架
+fastapi>=0.100.0
+uvicorn>=0.23.2
+
+# MT5 接口
+MetaTrader5>=5.0.45
+
+# 数据处理
+pandas>=2.0.0
+numpy>=1.24.0
+
+# 配置文件
+PyYAML>=6.0
+
+# HTTP 请求（用于 Telegram 通知）
+requests>=2.31.0
+
+# AI 相关（可选）
+# torch>=2.0.0
+# scikit-learn>=1.3.0
