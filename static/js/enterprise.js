@@ -512,7 +512,6 @@ class TradingWebSocket {
             });
             
             // 监听鼠标移动更新tooltip位置
-            const mainChartDom = document.getElementById('kline-chart');
             if (mainChartDom) {
                 mainChartDom.addEventListener('mousemove', (e) => {
                     this.lastMouseX = e.clientX;
